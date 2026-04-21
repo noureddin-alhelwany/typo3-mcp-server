@@ -1,3 +1,6 @@
+# Fork Project
+This is a fork of the orgnial repository: https://github.com/hauptsacheNet/typo3-mcp-server
+
 # TYPO3 MCP Server Extension
 
 **⚠️ This extension is a work in progress and under active development.**
