@@ -436,7 +436,7 @@ class TableAccessService implements SingletonInterface
                 'sys_domain', // Domain configuration
                 'sys_category', // Category system - safe for read operations
                 'sys_file', // FAL file records — read-only, not workspace-capable (see FAL.md)
-                'sys_file_reference', // FAL references — workspace-capable, readable here; writes gated by isTableReadOnly
+                'sys_file_reference', // FAL references — workspace-capable read/write via the FAL linking shortcut
             ];
 
             if (!in_array($table, $allowedRootTables)) {
@@ -496,7 +496,6 @@ class TableAccessService implements SingletonInterface
             'sys_file_processedfile', // Processed files are generated automatically
             'sys_file_storage', // Storage configuration - sensitive
             'sys_file_metadata', // File metadata - usually auto-generated
-            'sys_file_reference', // Readable now; writes land in a follow-up PR with the FAL linking shortcut
         ];
         
         if (in_array($table, $readOnlyTables)) {
@@ -693,12 +692,50 @@ class TableAccessService implements SingletonInterface
     }
     
     /**
-     * Get the type field name for a table
+     * Get the type field name for a table.
+     *
+     * Returns the full TCA ctrl.type value — which may be a plain column name
+     * (e.g. `CType`) or a polymorphic reference (e.g. `uid_local:type` on
+     * sys_file_reference, meaning "look up `type` on the record joined via
+     * `uid_local`"). Callers that need a SQL-safe column name must use
+     * {@see getTypeColumnName()} instead; the polymorphic form is not a
+     * database column and will fail if passed to SELECT.
      */
     public function getTypeFieldName(string $table): ?string
     {
         $ctrl = $GLOBALS['TCA'][$table]['ctrl'] ?? [];
         return $ctrl['type'] ?? null;
+    }
+
+    /**
+     * Local column portion of the type field, safe to use as a SQL column.
+     *
+     * For tables with a polymorphic `ctrl.type` (TCA pattern `<col>:<foreign>`),
+     * this returns only the local column before the colon. For plain type
+     * fields it returns the value unchanged. Returns null if the table has no
+     * type field at all.
+     */
+    public function getTypeColumnName(string $table): ?string
+    {
+        $typeField = $this->getTypeFieldName($table);
+        if ($typeField === null) {
+            return null;
+        }
+        $colonPos = strpos($typeField, ':');
+        return $colonPos === false ? $typeField : substr($typeField, 0, $colonPos);
+    }
+
+    /**
+     * True if the table's type field is polymorphic (TCA pattern
+     * `<local_col>:<foreign_col>`, e.g. sys_file_reference). Resolving the
+     * actual type value requires a cross-table lookup, so callers that
+     * perform type-scoped validation on the primary table must skip that
+     * step for polymorphic tables.
+     */
+    public function hasPolymorphicTypeField(string $table): bool
+    {
+        $typeField = $this->getTypeFieldName($table);
+        return $typeField !== null && str_contains($typeField, ':');
     }
     
     /**
@@ -850,10 +887,13 @@ class TableAccessService implements SingletonInterface
     public function getEssentialFields(string $table): array
     {
         $essentialFields = ['uid', 'pid'];
-        
-        // Add type field if it exists
-        if ($typeField = $this->getTypeFieldName($table)) {
-            $essentialFields[] = $typeField;
+
+        // Add type field if it exists. For polymorphic type fields
+        // (`<col>:<foreign_col>`) only the local column is a real SQL column;
+        // the foreign-key suffix must be stripped or callers that treat this
+        // list as SELECT columns crash with "Unknown column 'uid_local:type'".
+        if ($typeColumn = $this->getTypeColumnName($table)) {
+            $essentialFields[] = $typeColumn;
         }
         
         // Add label field if it exists

@@ -110,7 +110,7 @@ $writeTool->execute([
 ### 2. FAL Tables (`sys_file`, `sys_file_reference`)
 - `sys_file` and `sys_file_reference` are readable. Inline FAL fields on content records (e.g., `tt_content.image`) are expanded so each reference carries the full `sys_file` record under `file`.
 - `sys_file` stays read-only because it is not workspace-capable — it is filesystem-backed and edited via the planned upload tool, not via direct DB writes.
-- `sys_file_reference` is temporarily read-only via MCP tools. Write support lands together with the FAL linking shortcut; when it does, references move through the workspace like any other content record.
+- `sys_file_reference` is writable through the FAL linking shortcut: list target files by UID on the parent's inline field (`image: [{file: 42, alternative: "…"}]`) and MCP fills in `uid_local` / `tablenames` / `fieldname` / `uid_foreign` automatically. Writes go through the current workspace like any other content record.
 - See [FAL.md](FAL.md) for the full policy.
 
 ### 3. Automatic Workspace Handling
@@ -166,7 +166,7 @@ $connection->update('child_table', ['parent_field' => $parentUid], ['uid' => $ch
 
 ## Future Improvements
 
-1. **File Reference Support**: Enable `sys_file_reference` writes alongside the planned FAL upload tool. See [FAL.md](FAL.md).
+1. **File Upload Tool**: Complete the FAL story by adding an `UploadFile` tool that writes `sys_file` + physical file directly to live. See [FAL.md](FAL.md).
 2. **Batch Operations**: Support for bulk inline relation updates
 3. **Position Management**: Full support for positioning inline records (before/after specific records)
 4. **Validation Enhancement**: More comprehensive validation for embedded record data

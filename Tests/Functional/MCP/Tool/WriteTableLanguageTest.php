@@ -24,14 +24,20 @@ class WriteTableLanguageTest extends FunctionalTestCase
     protected function setUp(): void
     {
         parent::setUp();
-        
+
+        // TYPO3 14 DataHandler::localize calls getLanguageService() which now type-hints
+        // its return; without $GLOBALS['LANG'] this throws a TypeError. Initialise it
+        // once up-front — AbstractFunctionalTest does this for most tests, but this
+        // suite extends FunctionalTestCase directly.
+        $GLOBALS['LANG'] = GeneralUtility::makeInstance(LanguageServiceFactory::class)->create('default');
+
         // Create multi-language site configuration
         $this->createMultiLanguageSiteConfiguration();
-        
+
         // Import test data
         $this->importCSVDataSet(__DIR__ . '/../../Fixtures/pages.csv');
         $this->importCSVDataSet(__DIR__ . '/../../Fixtures/be_users.csv');
-        
+
         // Set up backend user
         $this->setUpBackendUser(1);
     }
@@ -340,8 +346,8 @@ class WriteTableLanguageTest extends FunctionalTestCase
             ]
         ]);
         
-        $this->assertFalse($translateResult->isError);
-        
+        $this->assertFalse($translateResult->isError, $translateResult->content[0]->text ?? '');
+
         // Try to translate to German again (should fail)
         $result = $tool->execute([
             'action' => 'translate',
@@ -354,10 +360,12 @@ class WriteTableLanguageTest extends FunctionalTestCase
         
         $this->assertTrue($result->isError);
         $errorMessage = $result->error ?? ($result->content[0]->text ?? '');
-        // TYPO3 returns a different error message when using DataHandler
+        // TYPO3 returns a different error message when using DataHandler; the exact
+        // phrasing varies by version.
         $this->assertTrue(
-            str_contains($errorMessage, 'Translation already exists') || 
-            str_contains($errorMessage, 'already are localizations'),
+            str_contains($errorMessage, 'Translation already exists')
+            || str_contains($errorMessage, 'already are localizations')
+            || str_contains($errorMessage, 'already been localized'),
             'Expected error about existing translation, got: ' . $errorMessage
         );
     }

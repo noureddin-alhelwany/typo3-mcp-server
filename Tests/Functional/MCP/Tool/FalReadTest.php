@@ -333,6 +333,120 @@ class FalReadTest extends AbstractFunctionalTest
     }
 
     /**
+     * Bug 2 regression: `fields=[uid, image]` (FAL field without CType) must still
+     * expand the references. Previously CType was silently dropped from the record
+     * before `includeRelations` ran, so the relation serializer couldn't tell the
+     * field applied and fell back to the raw DB counter.
+     */
+    public function testFalExpansionWithFieldsFilterMissingType(): void
+    {
+        $result = $this->readTool->execute([
+            'table' => 'tt_content',
+            'uid' => 120,
+            'fields' => ['uid', 'image'],
+        ]);
+
+        $this->assertSuccessfulToolResult($result);
+        $data = $this->extractJsonFromResult($result);
+        $record = $data['records'][0];
+
+        $this->assertArrayNotHasKey('CType', $record, 'CType must not leak into the response when not requested');
+        $this->assertArrayHasKey('image', $record);
+        $this->assertIsArray($record['image'], 'image must be expanded to a reference array, not a counter');
+        $this->assertCount(1, $record['image']);
+        $this->assertSame(500, (int)$record['image'][0]['uid']);
+        $this->assertArrayHasKey('file', $record['image'][0]);
+        $this->assertSame(1, (int)$record['image'][0]['file']['uid']);
+    }
+
+    public function testFalExpansionWithExplicitTypeFieldIsUnchanged(): void
+    {
+        $result = $this->readTool->execute([
+            'table' => 'tt_content',
+            'uid' => 120,
+            'fields' => ['uid', 'CType', 'image'],
+        ]);
+
+        $this->assertSuccessfulToolResult($result);
+        $record = $this->extractJsonFromResult($result)['records'][0];
+        $this->assertSame('image', $record['CType']);
+        $this->assertIsArray($record['image']);
+        $this->assertCount(1, $record['image']);
+    }
+
+    /**
+     * Workspace implementation details (`_ORIG_uid`, `t3ver_*`) must not leak to the
+     * client. CLAUDE.md: "workspaces must be invisible to the MCP client".
+     * Create a workspace modification on a live reference so workspaceOL actually
+     * does something, then verify the response is clean.
+     */
+    public function testWorkspaceFieldsAreNotExposedOnFalChildren(): void
+    {
+        $workspaceId = $this->createAndSwitchToWorkspace('FAL Overlay Test');
+
+        // Forge a workspace modification on sys_file_reference 500 with a new title.
+        // Written directly (not via DataHandler) so the assertion is purely about
+        // the read-side strip, not about the write pipeline.
+        $this->connectionPool->getConnectionForTable('sys_file_reference')->insert(
+            'sys_file_reference',
+            [
+                'pid' => 1,
+                'tstamp' => 1734875900,
+                'crdate' => 1734875000,
+                'sys_language_uid' => 0,
+                'uid_local' => 1,
+                'uid_foreign' => 120,
+                'tablenames' => 'tt_content',
+                'fieldname' => 'image',
+                'sorting_foreign' => 1,
+                'title' => 'Hero image title overlaid',
+                'alternative' => 'Hero alt text overlaid',
+                'description' => 'Hero description',
+                'link' => '',
+                'crop' => '{}',
+                't3ver_oid' => 500,
+                't3ver_wsid' => $workspaceId,
+                't3ver_state' => 0,
+                't3ver_stage' => 0,
+            ]
+        );
+
+        $result = $this->readTool->execute(['table' => 'tt_content', 'uid' => 120]);
+        $this->assertSuccessfulToolResult($result);
+        $record = $this->extractJsonFromResult($result)['records'][0];
+
+        // Workspace modification must be visible (overlay worked).
+        $this->assertSame('Hero alt text overlaid', $record['image'][0]['alternative']);
+        // Live UID must be exposed, not the workspace placeholder UID.
+        $this->assertSame(500, (int)$record['image'][0]['uid']);
+
+        // No workspace internals on the child record or its embedded sys_file.
+        $forbidden = ['_ORIG_uid', '_ORIG_pid', 't3ver_oid', 't3ver_wsid', 't3ver_state', 't3ver_stage'];
+        foreach ($forbidden as $key) {
+            $this->assertArrayNotHasKey($key, $record['image'][0], "field '{$key}' must be stripped from FAL children");
+            if (isset($record['image'][0]['file'])) {
+                $this->assertArrayNotHasKey($key, $record['image'][0]['file'], "field '{$key}' must be stripped from embedded sys_file");
+            }
+            $this->assertArrayNotHasKey($key, $record, "field '{$key}' must be stripped from the parent record");
+        }
+    }
+
+    public function testNonRelationFieldsDoNotAutoAddTypeField(): void
+    {
+        $result = $this->readTool->execute([
+            'table' => 'tt_content',
+            'uid' => 120,
+            'fields' => ['uid', 'header'],
+        ]);
+
+        $this->assertSuccessfulToolResult($result);
+        $record = $this->extractJsonFromResult($result)['records'][0];
+        $this->assertArrayNotHasKey('CType', $record, 'CType must not be auto-added when no type-scoped relation is requested');
+        $this->assertArrayNotHasKey('image', $record);
+        $this->assertArrayHasKey('header', $record);
+    }
+
+    /**
      * Bug C: References must be filtered by their `tablenames` column. A row with
      * tablenames="bogus_other_table" must not leak into tt_content reads even if it
      * shares uid_foreign with a real tt_content record.

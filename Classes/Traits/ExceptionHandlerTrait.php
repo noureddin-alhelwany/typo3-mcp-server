@@ -47,10 +47,19 @@ trait ExceptionHandlerTrait
     {
         // Log the exception
         $this->logException($e, $operation);
-        
+
+        // Optional diagnostic: dump unexpected exceptions to stderr when the
+        // MCP_DUMP_EXCEPTIONS env var is set. Useful when investigating why a
+        // WriteTable call fell through to a generic "unexpected error" reply.
+        if (getenv('MCP_DUMP_EXCEPTIONS')) {
+            fwrite(STDERR, "\n[ExceptionHandler] " . get_class($e) . ': ' . $e->getMessage()
+                . "\n  in " . $e->getFile() . ':' . $e->getLine()
+                . "\n  Trace: " . $e->getTraceAsString() . "\n");
+        }
+
         // Determine user-friendly message
         $userMessage = $this->getUserFriendlyMessage($e, $operation);
-        
+
         return $this->createErrorResult($userMessage);
     }
     

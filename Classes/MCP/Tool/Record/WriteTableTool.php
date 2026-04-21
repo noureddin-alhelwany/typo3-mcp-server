@@ -23,10 +23,162 @@ class WriteTableTool extends AbstractRecordTool
 {
     protected LanguageService $languageService;
 
+    /**
+     * When true, each call attaches a `_debug` block with DataHandler internals to the
+     * response. Enabled per-call via the `debug` input parameter.
+     */
+    protected bool $debugEnabled = false;
+
+    /**
+     * Per-call accumulator for debug snapshots, cleared at the start of each doExecute().
+     * @var array<string, array<string, mixed>>
+     */
+    protected array $debugLog = [];
+
     public function __construct()
     {
         parent::__construct();
         $this->languageService = GeneralUtility::makeInstance(LanguageService::class);
+    }
+
+    /**
+     * Snapshot a DataHandler's state after a process_* call so we can surface
+     * internal decisions when debug is on. No-op when debug is off.
+     */
+    protected function captureDataHandler(DataHandler $dh, string $phase): void
+    {
+        if (!$this->debugEnabled) {
+            return;
+        }
+        $this->debugLog[$phase] = [
+            'datamap' => $dh->datamap ?? [],
+            'cmdmap' => $dh->cmdmap ?? [],
+            'errorLog' => $dh->errorLog ?? [],
+            'substNEWwithIDs' => $dh->substNEWwithIDs ?? [],
+            'copyMappingArray' => $dh->copyMappingArray ?? [],
+        ];
+    }
+
+    /**
+     * Returns a formatted error message if DataHandler reported errors, null otherwise.
+     * Centralises what used to be ad-hoc `!empty(errorLog)` checks with inconsistent
+     * formatting scattered across create/update/delete/translate.
+     */
+    protected function assertDataHandlerSuccess(DataHandler $dh, string $context): ?string
+    {
+        if (empty($dh->errorLog)) {
+            return null;
+        }
+        return "DataHandler error during {$context}: " . implode(' | ', $dh->errorLog);
+    }
+
+    /**
+     * Attach the captured debug block to a successful or failed result if debug is on.
+     * Returns the result unchanged otherwise.
+     */
+    protected function attachDebug(CallToolResult $result): CallToolResult
+    {
+        if (!$this->debugEnabled || empty($this->debugLog)) {
+            return $result;
+        }
+        // Rewrite the single text-content payload to merge in `_debug`.
+        if (!empty($result->content) && isset($result->content[0])
+            && $result->content[0] instanceof \Mcp\Types\TextContent) {
+            $decoded = json_decode($result->content[0]->text, true);
+            if (is_array($decoded)) {
+                $decoded['_debug'] = $this->debugLog;
+                return new CallToolResult(
+                    [new \Mcp\Types\TextContent(json_encode($decoded, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE))],
+                    $result->isError
+                );
+            }
+            // Non-JSON text (error message) — append debug as a second content block.
+            return new CallToolResult(
+                [
+                    $result->content[0],
+                    new \Mcp\Types\TextContent('_debug: ' . json_encode($this->debugLog, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE)),
+                ],
+                $result->isError
+            );
+        }
+        return $result;
+    }
+
+    /**
+     * Explicit workspace versioning for live records.
+     *
+     * Background: `DataHandler::process_datamap()` is supposed to auto-version live
+     * records in workspace context, but in practice it sometimes silently drops the
+     * update without populating `errorLog`. Performing the versioning explicitly via
+     * a cmdmap `version → new` closes that gap and gives us a stable workspace UID
+     * to target with the subsequent datamap.
+     *
+     * Returns the workspace UID to use for further operations:
+     *  - live workspace (ws 0): caller's liveUid unchanged.
+     *  - record is already a workspace placeholder (t3ver_wsid > 0): unchanged.
+     *  - existing workspace version present: that version's UID.
+     *  - otherwise: a fresh workspace version is created via cmdmap.
+     */
+    protected function ensureWorkspaceVersion(string $table, int $liveUid): int
+    {
+        $workspaceId = (int)($GLOBALS['BE_USER']->workspace ?? 0);
+        if ($workspaceId === 0 || $liveUid <= 0) {
+            return $liveUid;
+        }
+
+        // If the UID already points at a workspace-native record (new placeholder or
+        // existing modification), don't try to re-version it.
+        $queryBuilder = GeneralUtility::makeInstance(ConnectionPool::class)
+            ->getQueryBuilderForTable($table);
+        $queryBuilder->getRestrictions()->removeAll();
+        $record = $queryBuilder
+            ->select('t3ver_oid', 't3ver_state', 't3ver_wsid')
+            ->from($table)
+            ->where(
+                $queryBuilder->expr()->eq('uid', $queryBuilder->createNamedParameter($liveUid, ParameterType::INTEGER))
+            )
+            ->executeQuery()
+            ->fetchAssociative();
+        if (!$record) {
+            return $liveUid;
+        }
+        if ((int)($record['t3ver_wsid'] ?? 0) > 0) {
+            return $liveUid;
+        }
+
+        // Look for an existing workspace modification of this live record.
+        $existing = BackendUtility::getWorkspaceVersionOfRecord($workspaceId, $table, $liveUid, 'uid');
+        if (is_array($existing) && !empty($existing['uid'])) {
+            return (int)$existing['uid'];
+        }
+
+        // Create a fresh workspace version via cmdmap.
+        $dataHandler = GeneralUtility::makeInstance(DataHandler::class);
+        $dataHandler->BE_USER = $GLOBALS['BE_USER'];
+        $dataHandler->start([], [$table => [$liveUid => ['version' => ['action' => 'new']]]]);
+        $dataHandler->process_cmdmap();
+        $this->captureDataHandler($dataHandler, "versionize:{$table}:{$liveUid}");
+
+        $workspaceUid = $dataHandler->copyMappingArray[$table][$liveUid] ?? null;
+        if ($workspaceUid) {
+            return (int)$workspaceUid;
+        }
+
+        // Last resort: search the DB for the just-created workspace row.
+        $queryBuilder = GeneralUtility::makeInstance(ConnectionPool::class)
+            ->getQueryBuilderForTable($table);
+        $queryBuilder->getRestrictions()->removeAll();
+        $row = $queryBuilder
+            ->select('uid')
+            ->from($table)
+            ->where(
+                $queryBuilder->expr()->eq('t3ver_oid', $queryBuilder->createNamedParameter($liveUid, ParameterType::INTEGER)),
+                $queryBuilder->expr()->eq('t3ver_wsid', $queryBuilder->createNamedParameter($workspaceId, ParameterType::INTEGER))
+            )
+            ->setMaxResults(1)
+            ->executeQuery()
+            ->fetchAssociative();
+        return $row && !empty($row['uid']) ? (int)$row['uid'] : $liveUid;
     }
 
     /**
@@ -88,6 +240,11 @@ class WriteTableTool extends AbstractRecordTool
                         'description' => 'Position for new records: "top", "bottom", "after:UID", or "before:UID"',
                         'default' => 'bottom',
                     ],
+                    'debug' => [
+                        'type' => 'boolean',
+                        'description' => 'When true, the response includes a `_debug` block with DataHandler internals (datamap, cmdmap, errorLog, substNEWwithIDs, copyMappingArray) for each phase. Use only while diagnosing write failures.',
+                        'default' => false,
+                    ],
                 ],
                 'required' => ['action', 'table'],
             ],
@@ -103,7 +260,59 @@ class WriteTableTool extends AbstractRecordTool
      */
     protected function doExecute(array $params): CallToolResult
     {
-        
+        $this->debugEnabled = !empty($params['debug']);
+        $this->debugLog = [];
+
+        try {
+            return $this->doExecuteInner($params);
+        } catch (\Throwable $e) {
+            // Capture the exception in the debug accumulator so `debug=true` calls see
+            // the real cause. Without this hook the exception propagates to
+            // AbstractTool::execute → ExceptionHandlerTrait and the generic
+            // "Database operation failed" / "Invalid input" string reaches the client
+            // with no _debug block, because attachDebug() only runs on the normal
+            // return paths inside this class.
+            // Trim the trace aggressively — 5 frames is plenty to locate the
+            // failure site, and keeps the _debug payload small when the error
+            // is surfaced. Previous-exception chain is included explicitly
+            // because DBAL wraps driver errors and the useful signal lives
+            // in the cause.
+            $this->debugLog['exception'] = [
+                'class' => get_class($e),
+                'message' => $e->getMessage(),
+                'file' => $e->getFile(),
+                'line' => $e->getLine(),
+                'trace' => array_slice(explode("\n", $e->getTraceAsString()), 0, 5),
+            ];
+            if ($previous = $e->getPrevious()) {
+                $this->debugLog['exception']['previous'] = [
+                    'class' => get_class($previous),
+                    'message' => $previous->getMessage(),
+                    'file' => $previous->getFile(),
+                    'line' => $previous->getLine(),
+                ];
+            }
+
+            if ($this->debugEnabled) {
+                // Return a structured error that still carries the full debug block.
+                // The original exception class + message surfaces to the caller so
+                // they can diagnose without re-running with extra tracing tools.
+                $errorMessage = get_class($e) . ': ' . $e->getMessage();
+                return $this->attachDebug($this->createErrorResult($errorMessage));
+            }
+
+            // Non-debug callers keep the existing generic-message behaviour so
+            // DBAL query strings or stack traces don't leak unintentionally.
+            throw $e;
+        }
+    }
+
+    /**
+     * Main doExecute body, separated so the outer wrapper can catch exceptions
+     * after the debug accumulator has been populated.
+     */
+    protected function doExecuteInner(array $params): CallToolResult
+    {
         // Get parameters
         $action = $params['action'] ?? '';
         $table = $params['table'] ?? '';
@@ -309,17 +518,18 @@ class WriteTableTool extends AbstractRecordTool
         // Process the parent record first
         $dataHandler->start($dataMap, []);
         $dataHandler->process_datamap();
-        
+        $this->captureDataHandler($dataHandler, "create:{$table}");
+
         // Check for errors in parent creation
         if (!empty($dataHandler->errorLog)) {
-            return $this->createErrorResult('Error creating record: ' . $this->formatDataHandlerErrors($dataHandler->errorLog));
+            return $this->attachDebug($this->createErrorResult('Error creating record: ' . $this->formatDataHandlerErrors($dataHandler->errorLog)));
         }
-        
+
         // Get the UID of the newly created parent record
         $parentUid = $dataHandler->substNEWwithIDs[$newId] ?? null;
-        
+
         if (!$parentUid) {
-            return $this->createErrorResult('Error creating record: No UID returned');
+            return $this->attachDebug($this->createErrorResult('Error creating record: No UID returned'));
         }
         
         // Get the live UID for inline relations if we're in a workspace
@@ -337,15 +547,16 @@ class WriteTableTool extends AbstractRecordTool
                 $childDataHandler->BE_USER = $GLOBALS['BE_USER'];
                 $childDataHandler->start($childDataMap, []);
                 $childDataHandler->process_datamap();
-                
-                
+                $this->captureDataHandler($childDataHandler, "create-children:{$table}");
+
+
                 // Check for errors in child creation
                 if (!empty($childDataHandler->errorLog)) {
                     // Parent was created but children failed
-                    return $this->createErrorResult(
-                        'Parent record created but error creating child records: ' . 
+                    return $this->attachDebug($this->createErrorResult(
+                        'Parent record created but error creating child records: ' .
                         implode(', ', $childDataHandler->errorLog)
-                    );
+                    ));
                 }
                 
                 // Update foreign fields for embedded relations
@@ -409,115 +620,136 @@ class WriteTableTool extends AbstractRecordTool
             $moveDataHandler->start([], $cmdMap);
             $moveDataHandler->process_cmdmap();
             
+            $this->captureDataHandler($moveDataHandler, "create-move:{$table}:{$parentUid}");
+
             // Check for errors in the move operation
             if (!empty($moveDataHandler->errorLog)) {
                 // The record was created but positioning failed
                 $liveUid = $this->getLiveUid($table, $parentUid);
-                return $this->createJsonResult([
+                return $this->attachDebug($this->createJsonResult([
                     'action' => 'create',
                     'table' => $table,
                     'uid' => $liveUid,
                     'warning' => 'Record created but positioning failed: ' . implode(', ', $moveDataHandler->errorLog)
-                ]);
+                ]));
             }
         }
-        
+
         // Get the live UID for workspace transparency
         $liveUid = $this->getLiveUid($table, $parentUid);
-        
+
         // Return the result with live UID
-        return $this->createJsonResult([
+        return $this->attachDebug($this->createJsonResult([
             'action' => 'create',
             'table' => $table,
             'uid' => $liveUid,
-        ]);
+        ]));
     }
     
     /**
-     * Update an existing record
+     * Update an existing record.
+     *
+     * The live → workspace bridge is explicit: before any datamap is built we call
+     * `ensureWorkspaceVersion()` so we're always writing to a workspace-owned UID,
+     * never to a live row. DataHandler's auto-versioning is unreliable for this
+     * case in practice — it silently drops updates on live records without
+     * populating errorLog. Direct editing of live data would also violate the
+     * CLAUDE.md rule.
      */
     protected function updateRecord(string $table, int $uid, array $data): CallToolResult
     {
+        // Confirm the record exists before we start versionizing or calling DataHandler.
+        // Without this, ensureWorkspaceVersion's cmdmap `version:new` on a missing
+        // liveUid can trigger a low-level DBAL exception that surfaces as the
+        // generic "Database operation failed" — so we fail fast with the UID in the
+        // message instead.
+        if (!$this->recordExistsForUpdate($table, $uid)) {
+            return $this->attachDebug($this->createErrorResult(
+                "Record {$table}:{$uid} not found. Either it does not exist, was deleted, "
+                . "or is not visible in the current workspace."
+            ));
+        }
+
         // Validate the data
         $validationResult = $this->validateRecordData($table, $data, 'update', $uid);
         if ($validationResult !== true) {
-            return $this->createErrorResult('Validation error: ' . $validationResult);
+            return $this->attachDebug($this->createErrorResult('Validation error: ' . $validationResult));
         }
-        
+
         // Extract inline relations before converting data
         $inlineRelations = $this->extractInlineRelations($table, $data);
-        
+
         // Convert data for storage
         $data = $this->convertDataForStorage($table, $data);
-        
-        // Resolve the live UID to workspace UID
-        $workspaceUid = $this->resolveToWorkspaceUid($table, $uid);
-        
-        // First, update the parent record without inline relations
-        $dataMap = [$table => [$workspaceUid => $data]];
-        
-        // Update the record using DataHandler
-        $dataHandler = GeneralUtility::makeInstance(DataHandler::class);
-        $dataHandler->BE_USER = $GLOBALS['BE_USER'];
-        $dataHandler->start($dataMap, []);
-        $dataHandler->process_datamap();
-        
-        // Check for errors in parent update
-        if (!empty($dataHandler->errorLog)) {
-            return $this->createErrorResult('Error updating record: ' . implode(', ', $dataHandler->errorLog));
+
+        // Bridge to workspace: live record → newly versionized workspace UID,
+        // existing workspace placeholder/modification → that UID.
+        $workspaceUid = $this->ensureWorkspaceVersion($table, $uid);
+
+        // If the parent actually carries data (image-only updates can leave this
+        // empty after extractInlineRelations), run the datamap. Otherwise skip —
+        // we already created the workspace version above so the parent is in scope.
+        if (!empty($data)) {
+            $dataMap = [$table => [$workspaceUid => $data]];
+            $dataHandler = GeneralUtility::makeInstance(DataHandler::class);
+            $dataHandler->BE_USER = $GLOBALS['BE_USER'];
+            $dataHandler->start($dataMap, []);
+            $dataHandler->process_datamap();
+            $this->captureDataHandler($dataHandler, "update:{$table}:{$uid}");
+
+            $dhError = $this->assertDataHandlerSuccess($dataHandler, "updating {$table}:{$uid}");
+            if ($dhError !== null) {
+                return $this->attachDebug($this->createErrorResult($dhError));
+            }
         }
-        
+
         // Now process inline relations with the resolved parent UID
         if (!empty($inlineRelations)) {
             // Get record's pid for creating new inline records
             $record = BackendUtility::getRecord($table, $workspaceUid, 'pid');
             $pid = $record['pid'] ?? 0;
-            
+
             $childDataMap = [];
             $this->processInlineRelations($childDataMap, $table, $workspaceUid, $pid, $inlineRelations, $uid);
-            
+
             if (!empty($childDataMap)) {
                 // Create a new DataHandler instance for child records
                 $childDataHandler = GeneralUtility::makeInstance(DataHandler::class);
                 $childDataHandler->BE_USER = $GLOBALS['BE_USER'];
                 $childDataHandler->start($childDataMap, []);
                 $childDataHandler->process_datamap();
-                
-                // Check for errors in child processing
-                if (!empty($childDataHandler->errorLog)) {
-                    return $this->createErrorResult('Error processing inline relations: ' . implode(', ', $childDataHandler->errorLog));
+                $this->captureDataHandler($childDataHandler, "update-children:{$table}:{$uid}");
+
+                $dhError = $this->assertDataHandlerSuccess($childDataHandler, "updating inline relations for {$table}:{$uid}");
+                if ($dhError !== null) {
+                    return $this->attachDebug($this->createErrorResult($dhError));
                 }
-                
-                // Update foreign fields for embedded relations
+
+                // Update foreign fields for newly-created embedded relations. Updated-in-place
+                // records keep their existing uid_foreign and don't need a post-update.
                 foreach ($inlineRelations as $fieldName => $relationData) {
                     $config = $relationData['config'];
                     $foreignTable = $config['foreign_table'] ?? '';
                     $foreignField = $config['foreign_field'] ?? '';
-                    
+
                     if (empty($foreignTable) || empty($foreignField)) {
                         continue;
                     }
-                    
-                    // Check if this is an embedded table
+
                     $foreignTableTCA = $GLOBALS['TCA'][$foreignTable] ?? [];
                     $isHiddenTable = ($foreignTableTCA['ctrl']['hideTable'] ?? false) === true;
-                    
+
                     if ($isHiddenTable) {
-                        // Collect the UIDs of created child records
                         $childUids = [];
                         foreach ($childDataHandler->substNEWwithIDs as $newId => $realId) {
                             if (strpos($newId, 'NEW') === 0 && isset($childDataMap[$foreignTable][$newId])) {
                                 $childUids[] = $realId;
                             }
                         }
-                        
+
                         if (!empty($childUids)) {
-                            // Update foreign field directly in database
-                            // RelationHandler's writeForeignField is for MM relations, not direct foreign fields
                             $connection = GeneralUtility::makeInstance(ConnectionPool::class)
                                 ->getConnectionForTable($foreignTable);
-                            
-                            // In update context, $uid is already the live UID
                             foreach ($childUids as $childUid) {
                                 $connection->update(
                                     $foreignTable,
@@ -530,13 +762,13 @@ class WriteTableTool extends AbstractRecordTool
                 }
             }
         }
-        
-        // Return the result with the original live UID
-        return $this->createJsonResult([
+
+        // Return the result with the original live UID (workspace transparency).
+        return $this->attachDebug($this->createJsonResult([
             'action' => 'update',
             'table' => $table,
-            'uid' => $uid, // Return the live UID that was passed in
-        ]);
+            'uid' => $uid,
+        ]));
     }
     
     /**
@@ -544,25 +776,27 @@ class WriteTableTool extends AbstractRecordTool
      */
     protected function deleteRecord(string $table, int $uid): CallToolResult
     {
-        // Resolve the live UID to workspace UID
+        // For delete, DataHandler handles workspace placeholders automatically when
+        // given a live UID, so we don't force-versionize here. resolveToWorkspaceUid
+        // routes to an existing workspace modification if one exists.
         $workspaceUid = $this->resolveToWorkspaceUid($table, $uid);
-        
-        // Delete the record using DataHandler
+
         $dataHandler = GeneralUtility::makeInstance(DataHandler::class);
         $dataHandler->BE_USER = $GLOBALS['BE_USER'];
         $dataHandler->start([], [$table => [$workspaceUid => ['delete' => 1]]]);
         $dataHandler->process_cmdmap();
-        
-        // Check for errors
-        if ($dataHandler->errorLog) {
-            return $this->createErrorResult('Error deleting record: ' . implode(', ', $dataHandler->errorLog));
+        $this->captureDataHandler($dataHandler, "delete:{$table}:{$uid}");
+
+        $dhError = $this->assertDataHandlerSuccess($dataHandler, "deleting {$table}:{$uid}");
+        if ($dhError !== null) {
+            return $this->attachDebug($this->createErrorResult($dhError));
         }
-        
-        return $this->createJsonResult([
+
+        return $this->attachDebug($this->createJsonResult([
             'action' => 'delete',
             'table' => $table,
-            'uid' => $uid, // Return the live UID that was passed in
-        ]);
+            'uid' => $uid,
+        ]));
     }
     
     /**
@@ -628,10 +862,12 @@ class WriteTableTool extends AbstractRecordTool
 
         $dataHandler->start([], $cmdMap);
         $dataHandler->process_cmdmap();
+        $this->captureDataHandler($dataHandler, "translate:{$table}:{$uid}");
 
         // Check for errors
-        if (!empty($dataHandler->errorLog)) {
-            return $this->createErrorResult('Error creating translation: ' . implode(', ', $dataHandler->errorLog));
+        $dhError = $this->assertDataHandlerSuccess($dataHandler, "creating translation for {$table}:{$uid}");
+        if ($dhError !== null) {
+            return $this->attachDebug($this->createErrorResult($dhError));
         }
 
         // Get the UID of the newly created translation
@@ -660,13 +896,13 @@ class WriteTableTool extends AbstractRecordTool
 
         $targetIsoCode = $this->languageService->getIsoCodeFromUid($targetLanguageUid) ?? $targetLanguageUid;
 
-        return $this->createJsonResult([
+        return $this->attachDebug($this->createJsonResult([
             'action' => 'translate',
             'table' => $table,
             'sourceUid' => $uid,
             'translationUid' => $newTranslationUid ?: 'Translation created but UID not found',
             'targetLanguage' => $targetIsoCode,
-        ]);
+        ]));
     }
 
     /**
@@ -687,7 +923,24 @@ class WriteTableTool extends AbstractRecordTool
         if (isset($data['pid']) && $action !== 'create') {
             return "Field 'pid' can only be set during record creation";
         }
-        
+
+        // Direct updates on sys_file_reference are permitted for metadata only — structural
+        // fields would break the link to the parent record. Those belong on the parent's
+        // FAL shortcut (image: [{uid: …, file: …}]).
+        if ($table === 'sys_file_reference' && $action === 'update') {
+            $structuralFields = [
+                'uid_local', 'uid_foreign', 'tablenames', 'fieldname',
+                'sorting_foreign', 'sys_language_uid', 'l10n_parent', 'l10n_source',
+            ];
+            foreach (array_keys($data) as $fieldName) {
+                if (in_array($fieldName, $structuralFields, true) || str_starts_with((string)$fieldName, 't3ver_')) {
+                    return "Field '{$fieldName}' on sys_file_reference is structural and cannot be updated directly. "
+                        . "Use WriteTable on the parent record with the FAL shortcut, e.g. "
+                        . "data={'image': [{'uid': <ref-uid>, 'file': <sys_file-uid>, 'alternative': '…'}]}.";
+                }
+            }
+        }
+
         // Validate and convert field values
         foreach ($data as $fieldName => $value) {
             $fieldConfig = $this->tableAccessService->getFieldConfig($table, $fieldName);
@@ -695,11 +948,12 @@ class WriteTableTool extends AbstractRecordTool
                 continue;
             }
 
-            // Reject type=file fields explicitly — they are readable (FAL expansion in ReadTable)
-            // but writing them requires the FAL linking shortcut that lands in a follow-up PR.
+            // TYPO3 13/14 `type=file` is the modern inline shorthand for sys_file_reference.
+            // Accept array input (FAL linking shortcut) and delegate to inline validation;
+            // reject scalars so legacy callers don't silently write garbage.
             $fieldType = $fieldConfig['config']['type'] ?? '';
-            if ($fieldType === 'file') {
-                return "Field '{$fieldName}': File fields are not supported. Please use TYPO3 backend for file operations.";
+            if ($fieldType === 'file' && !is_array($value)) {
+                return "Field '{$fieldName}': File fields must be provided as an array of references (FAL linking shortcut). Scalar values are not supported.";
             }
 
             // Check if field is accessible (filters out inaccessible inline relations)
@@ -729,10 +983,18 @@ class WriteTableTool extends AbstractRecordTool
                 }
             }
             
-            // Validate inline field type
-            if ($fieldConfig['config']['type'] === 'inline') {
-                // Validate inline relation data
-                $validationError = $this->validateInlineRelationData($fieldConfig, $value);
+            // Validate inline field type (and type=file, which is the inline shorthand
+            // for sys_file_reference in TYPO3 13/14)
+            if ($fieldConfig['config']['type'] === 'inline' || $fieldConfig['config']['type'] === 'file') {
+                $effectiveConfig = $fieldConfig;
+                if ($fieldConfig['config']['type'] === 'file') {
+                    $effectiveConfig['config'] = $this->buildFileFieldInlineConfig(
+                        $fieldConfig['config'],
+                        $table,
+                        $fieldName
+                    );
+                }
+                $validationError = $this->validateInlineRelationData($effectiveConfig, $value);
                 if ($validationError !== null) {
                     return "Field '{$fieldName}': " . $validationError;
                 }
@@ -749,22 +1011,30 @@ class WriteTableTool extends AbstractRecordTool
         }
         
         // After validating all field values, check field availability based on record type
-        // This ensures type field validation happens first
+        // This ensures type field validation happens first.
+        //
+        // Tables with a polymorphic type field (TCA `<col>:<foreign_col>`, e.g.
+        // sys_file_reference's `uid_local:type` which resolves via a join on
+        // sys_file) can't be looked up with a simple SELECT — the original code
+        // passed the raw `uid_local:type` string as a column list to
+        // BackendUtility::getRecord and crashed with "Unknown column
+        // 'uid_local:type'". We skip the type-scoped check in that case; the
+        // empty `$recordType` makes getAvailableFields return the union across
+        // sub-schemas, which is an acceptable over-approximation for polymorphic
+        // records.
         $recordType = '';
         $typeField = $this->tableAccessService->getTypeFieldName($table);
-        if ($typeField) {
+        $isPolymorphicType = $typeField !== null && str_contains($typeField, ':');
+        if ($typeField && !$isPolymorphicType) {
             if ($action === 'update' && $uid !== null) {
-                // For updates, fetch the current record type
                 $currentRecord = BackendUtility::getRecord($table, $uid, $typeField);
                 if ($currentRecord && isset($currentRecord[$typeField])) {
                     $recordType = (string)$currentRecord[$typeField];
                 }
-                // If type is being changed in the update, use the new type
                 if (isset($data[$typeField])) {
                     $recordType = (string)$data[$typeField];
                 }
             } else {
-                // For creates, get type from data
                 $recordType = isset($data[$typeField]) ? (string)$data[$typeField] : '';
             }
         }
@@ -816,29 +1086,63 @@ class WriteTableTool extends AbstractRecordTool
     
     
     /**
-     * Extract inline relations from data array
+     * Extract inline relations from data array.
+     *
+     * Also picks up TYPO3 13/14 `type=file` fields — the modern inline shorthand for
+     * sys_file_reference — and normalizes their config into an inline-shaped structure
+     * so the existing inline pipeline (processEmbeddedInlineRelations) can handle them.
      */
     protected function extractInlineRelations(string $table, array &$data): array
     {
         $inlineRelations = [];
-        
+
         if (!isset($GLOBALS['TCA'][$table]['columns'])) {
             return $inlineRelations;
         }
-        
+
         foreach ($data as $fieldName => $value) {
             $fieldConfig = $this->tableAccessService->getFieldConfig($table, $fieldName);
-            if ($fieldConfig && ($fieldConfig['config']['type'] ?? '') === 'inline') {
+            if (!$fieldConfig) {
+                continue;
+            }
+            $fieldType = $fieldConfig['config']['type'] ?? '';
+
+            if ($fieldType === 'inline') {
                 $inlineRelations[$fieldName] = [
                     'config' => $fieldConfig['config'],
-                    'value' => $value
+                    'value' => $value,
                 ];
-                // Remove from data array as we'll process it separately
+                unset($data[$fieldName]);
+            } elseif ($fieldType === 'file') {
+                $inlineRelations[$fieldName] = [
+                    'config' => $this->buildFileFieldInlineConfig($fieldConfig['config'], $table, $fieldName),
+                    'value' => $value,
+                ];
                 unset($data[$fieldName]);
             }
         }
-        
+
         return $inlineRelations;
+    }
+
+    /**
+     * Translate a TYPO3 13/14 `type=file` TCA config into the equivalent inline config
+     * so the existing sys_file_reference inline pipeline can handle it. Mirrors the
+     * helper in ReadTableTool.
+     */
+    protected function buildFileFieldInlineConfig(array $config, string $parentTable, string $fieldName): array
+    {
+        return [
+            'type' => 'inline',
+            'foreign_table' => $config['foreign_table'] ?? 'sys_file_reference',
+            'foreign_field' => $config['foreign_field'] ?? 'uid_foreign',
+            'foreign_sortby' => $config['foreign_sortby'] ?? 'sorting_foreign',
+            'foreign_table_field' => $config['foreign_table_field'] ?? 'tablenames',
+            'foreign_match_fields' => array_merge(
+                ['fieldname' => $fieldName, 'tablenames' => $parentTable],
+                $config['foreign_match_fields'] ?? []
+            ),
+        ];
     }
     
     /**
@@ -877,7 +1181,14 @@ class WriteTableTool extends AbstractRecordTool
     }
     
     /**
-     * Process embedded inline relations (hideTable=true)
+     * Process embedded inline relations (hideTable=true).
+     *
+     * Supports two input shapes per record:
+     *  - Without `uid`: created fresh (new sys_file_reference row in the workspace).
+     *  - With `uid`: updated in-place so the live UID is preserved across reorders.
+     *
+     * For sys_file_reference, applies the FAL linking shortcut: `file` → `uid_local`
+     * and auto-fill of `tablenames`/`fieldname` from the config's foreign_match_fields.
      */
     protected function processEmbeddedInlineRelations(
         array &$dataMap,
@@ -893,31 +1204,68 @@ class WriteTableTool extends AbstractRecordTool
         if ($liveUid !== null) {
             $this->handleExistingEmbeddedRelations($foreignTable, $foreignField, $liveUid, $records);
         }
-        
+
         foreach ($records as $index => $recordData) {
             if (!is_array($recordData)) {
                 continue;
             }
-            
-            // Create new ID for the inline record
-            $newId = 'NEW' . uniqid() . '_' . $index;
-            
-            // Don't set the foreign field here - it will be handled by RelationHandler
-            // Remove it if it was accidentally included
+
+            $recordData = $this->applyFalShortcut($recordData, $foreignTable);
+
+            // Auto-fill foreign_match_fields (e.g. tablenames/fieldname for sys_file_reference)
+            // when the client didn't provide them explicitly.
+            foreach ($config['foreign_match_fields'] ?? [] as $matchField => $matchValue) {
+                if (!isset($recordData[$matchField]) || $recordData[$matchField] === '') {
+                    $recordData[$matchField] = $matchValue;
+                }
+            }
+
+            // Don't set the foreign field here - it will be handled after DataHandler
             unset($recordData[$foreignField]);
-            $recordData['pid'] = $pid;
-            
-            // If we have a sorting field, set it
+
+            // Apply sorting if configured
             if (isset($config['foreign_sortby'])) {
                 $recordData[$config['foreign_sortby']] = ($index + 1) * 256;
             }
-            
-            // Add to data map
+
             if (!isset($dataMap[$foreignTable])) {
                 $dataMap[$foreignTable] = [];
             }
-            $dataMap[$foreignTable][$newId] = $recordData;
+
+            // If the client passed a UID, update that reference in place — this preserves
+            // the live UID across reorders. Without a UID we create a new row and the
+            // handleExistingEmbeddedRelations step above will have purged the old one.
+            if (isset($recordData['uid']) && is_numeric($recordData['uid']) && (int)$recordData['uid'] > 0) {
+                $existingUid = (int)$recordData['uid'];
+                unset($recordData['uid']);
+                // Bridge to workspace: same rationale as in updateRecord — a live
+                // child UID would otherwise get silently dropped by DataHandler or,
+                // worse, flow straight into live.
+                $targetUid = $this->ensureWorkspaceVersion($foreignTable, $existingUid);
+                $dataMap[$foreignTable][$targetUid] = $recordData;
+            } else {
+                unset($recordData['uid']);
+                $recordData['pid'] = $pid;
+                $newId = 'NEW' . uniqid() . '_' . $index;
+                $dataMap[$foreignTable][$newId] = $recordData;
+            }
         }
+    }
+
+    /**
+     * FAL linking shortcut: translate client-friendly `file` → DB field `uid_local`
+     * for sys_file_reference records.
+     */
+    protected function applyFalShortcut(array $recordData, string $foreignTable): array
+    {
+        if ($foreignTable !== 'sys_file_reference') {
+            return $recordData;
+        }
+        if (isset($recordData['file']) && !isset($recordData['uid_local'])) {
+            $recordData['uid_local'] = (int)$recordData['file'];
+        }
+        unset($recordData['file']);
+        return $recordData;
     }
     
     /**
@@ -1090,6 +1438,16 @@ class WriteTableTool extends AbstractRecordTool
                 if (empty($item)) {
                     return 'Embedded inline relation record at index ' . $index . ' is empty';
                 }
+                // FAL linking shortcut: each sys_file_reference entry must carry a file pointer.
+                if ($foreignTable === 'sys_file_reference') {
+                    $fileUid = $item['file'] ?? $item['uid_local'] ?? null;
+                    if ($fileUid === null || !is_numeric($fileUid) || (int)$fileUid <= 0) {
+                        return "sys_file_reference entry at index {$index} requires a positive integer 'file' (sys_file UID)";
+                    }
+                    if (!$this->sysFileExists((int)$fileUid)) {
+                        return "sys_file_reference entry at index {$index} references non-existent sys_file UID {$fileUid}";
+                    }
+                }
             } else {
                 // For independent tables, expect UIDs
                 if (!is_numeric($item) || $item <= 0) {
@@ -1097,8 +1455,110 @@ class WriteTableTool extends AbstractRecordTool
                 }
             }
         }
-        
+
         return null;
+    }
+
+    /**
+     * True if a record with the given live UID exists, visible in either live or
+     * the current workspace. Used by updateRecord() to fail fast on missing UIDs
+     * so the caller gets a clear error instead of a downstream DBAL failure.
+     */
+    protected function recordExistsForUpdate(string $table, int $uid): bool
+    {
+        if ($uid <= 0) {
+            return false;
+        }
+        $workspaceId = (int)($GLOBALS['BE_USER']->workspace ?? 0);
+
+        $queryBuilder = GeneralUtility::makeInstance(ConnectionPool::class)
+            ->getQueryBuilderForTable($table);
+        $queryBuilder->getRestrictions()->removeAll();
+
+        // Record is valid if:
+        //   (a) uid matches a non-deleted row in live (t3ver_wsid=0), or
+        //   (b) uid matches a workspace row of the current workspace
+        //       (a new placeholder or a modification).
+        $predicates = [
+            $queryBuilder->expr()->and(
+                $queryBuilder->expr()->eq('uid', $queryBuilder->createNamedParameter($uid, ParameterType::INTEGER)),
+                $queryBuilder->expr()->eq('t3ver_wsid', $queryBuilder->createNamedParameter(0, ParameterType::INTEGER))
+            ),
+        ];
+        if ($workspaceId > 0) {
+            $predicates[] = $queryBuilder->expr()->and(
+                $queryBuilder->expr()->eq('uid', $queryBuilder->createNamedParameter($uid, ParameterType::INTEGER)),
+                $queryBuilder->expr()->eq('t3ver_wsid', $queryBuilder->createNamedParameter($workspaceId, ParameterType::INTEGER))
+            );
+            $predicates[] = $queryBuilder->expr()->and(
+                $queryBuilder->expr()->eq('t3ver_oid', $queryBuilder->createNamedParameter($uid, ParameterType::INTEGER)),
+                $queryBuilder->expr()->eq('t3ver_wsid', $queryBuilder->createNamedParameter($workspaceId, ParameterType::INTEGER))
+            );
+        }
+
+        // Not-deleted requirement; `deleted` is a tstamp or bool depending on TCA but
+        // in practice always 0/1 so we can compare to 0. Use soft-delete field only
+        // if the table declares one.
+        $deletedField = $GLOBALS['TCA'][$table]['ctrl']['delete'] ?? null;
+        if ($deletedField) {
+            $deletedCheck = $queryBuilder->expr()->eq(
+                $deletedField,
+                $queryBuilder->createNamedParameter(0, ParameterType::INTEGER)
+            );
+        } else {
+            $deletedCheck = null;
+        }
+
+        $where = $queryBuilder->expr()->or(...$predicates);
+        if ($deletedCheck !== null) {
+            $where = $queryBuilder->expr()->and($where, $deletedCheck);
+        }
+
+        try {
+            $count = $queryBuilder
+                ->count('uid')
+                ->from($table)
+                ->where($where)
+                ->executeQuery()
+                ->fetchOne();
+        } catch (\Throwable $e) {
+            // If the existence check itself fails we let the rest of the update
+            // flow decide what to do — keep the debug accumulator intact for the
+            // outer catch.
+            $this->debugLog['recordExistsForUpdate'] = [
+                'exception' => get_class($e) . ': ' . $e->getMessage(),
+            ];
+            return true;
+        }
+        return (int)$count > 0;
+    }
+
+    /**
+     * Check that a sys_file record exists. sys_file is not workspace-capable so we only
+     * apply DeletedRestriction.
+     */
+    protected function sysFileExists(int $uid): bool
+    {
+        if ($uid <= 0) {
+            return false;
+        }
+        $queryBuilder = GeneralUtility::makeInstance(ConnectionPool::class)
+            ->getQueryBuilderForTable('sys_file');
+        $queryBuilder->getRestrictions()
+            ->removeAll()
+            ->add(GeneralUtility::makeInstance(DeletedRestriction::class));
+        $found = $queryBuilder
+            ->count('uid')
+            ->from('sys_file')
+            ->where(
+                $queryBuilder->expr()->eq(
+                    'uid',
+                    $queryBuilder->createNamedParameter($uid, ParameterType::INTEGER)
+                )
+            )
+            ->executeQuery()
+            ->fetchOne();
+        return (int)$found > 0;
     }
     
     /**

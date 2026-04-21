@@ -113,14 +113,6 @@ class InlineRelationWriteTest extends FunctionalTestCase
     }
 
     /**
-     * Test writing inline relations for hidden tables (sys_file_reference)
-     */
-    public function testWriteHiddenTableInlineRelation(): void
-    {
-        $this->markTestSkipped('sys_file_reference is intentionally restricted due to workspace limitations');
-    }
-
-    /**
      * Test updating inline relations through parent record using UID arrays
      */
     public function testWriteInlineRelationThroughParentUsingUids(): void

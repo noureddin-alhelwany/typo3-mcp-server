@@ -255,7 +255,7 @@ Relations are transparently resolved and can be set using simple syntax:
 - **Select relations**: Use comma-separated IDs or arrays
 - **Inline relations**: Provide as nested objects
 - **MM relations**: Handled automatically
-- **File references**: Currently read-only (see [FAL.md](Documentation/Architecture/FAL.md) for the planned upload + linking approach)
+- **File references**: Read + link existing files via the FAL linking shortcut (`image: [{file: 42, alternative: "…"}]`). Uploads are still pending — see [FAL.md](Documentation/Architecture/FAL.md)
 - **Bidirectional**: Updates both sides as needed
 
 ### Language Support
@@ -317,10 +317,10 @@ The MCP Server respects all TYPO3 permissions:
 While the MCP Server is powerful, some features are still in development:
 
 ### Image/File Handling
-- Currently read-only access to file references
-- Cannot upload new files or modify existing ones
-- Workaround: Reference existing files by ID
-- Planned: the architecture and workspace-safety boundary are specified in [FAL.md](Documentation/Architecture/FAL.md); the upload tool itself is not yet implemented.
+- Linking existing files to records works via the FAL linking shortcut (`image: [{file: 42, ...}]`); references go through the workspace.
+- Cannot upload new files yet — the upload tool is planned.
+- Workaround: pre-upload files through the TYPO3 backend, then reference them by `sys_file.uid`.
+- See [FAL.md](Documentation/Architecture/FAL.md) for the workspace-safety boundary.
 
 ### Direct Workspace Management
 - Cannot create/delete workspaces

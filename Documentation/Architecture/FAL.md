@@ -70,10 +70,82 @@ By contrast, `sys_file_reference` **is** workspace-capable (standard TYPO3 confi
 
 The reference `uid` is always the live UID — workspace overlays swap `t3ver_oid → uid` before the record is serialised, so the client never sees workspace IDs. `sys_file` is not workspace-capable and is therefore loaded directly from live.
 
+## Linking Shortcut
+
+`WriteTable` accepts an ergonomic shortcut for attaching existing files to a parent record. Instead of forcing the client to know the full `sys_file_reference` shape (`uid_local`, `tablenames`, `fieldname`, `uid_foreign`), they simply list the target files by UID on the parent's inline field:
+
+```json
+{
+  "action": "create",
+  "table": "tt_content",
+  "pid": 1,
+  "data": {
+    "CType": "image",
+    "header": "Hero",
+    "image": [
+      {
+        "file": 42,
+        "alternative": "Hero alt",
+        "title": "Main hero",
+        "link": "t3://page?uid=5"
+      }
+    ]
+  }
+}
+```
+
+Under the hood MCP translates each entry into a `sys_file_reference` row:
+
+| Client field           | `sys_file_reference` column | Notes                                                                |
+|------------------------|-----------------------------|----------------------------------------------------------------------|
+| `file`                 | `uid_local`                 | Must be a positive integer, must exist in `sys_file`.                |
+| (implicit)             | `tablenames` + `fieldname`  | Auto-filled from the parent table and field name.                    |
+| (implicit)             | `uid_foreign`               | Set to the parent UID after DataHandler resolves `NEW…` placeholders.|
+| `alternative`, `title`, `description`, `link`, `crop`, `autoplay`, … | same name | Passed through verbatim — extension-specific columns are accepted.   |
+
+Updates with a stable `uid` on each reference (as returned by `ReadTable`) preserve the live UID through reorders and content edits; entries without a `uid` are treated as new and the existing references not present in the input are removed.
+
+References always run through the current workspace.
+
+## Workspace Versioning for Live Records
+
+Updates that target a record with no pre-existing workspace version — whether on the parent (`tt_content`) or directly on a `sys_file_reference` — run through an explicit two-step DataHandler sequence:
+
+1. `cmdmap: {table: {liveUid: {version: {action: "new"}}}}` creates a workspace version of the record. TYPO3 auto-versionizes inline children (sys_file_reference rows reachable via IRRE) at the same time.
+2. `datamap: {table: {workspaceUid: {…fields…}}}` applies the edit on the fresh workspace version.
+
+Why explicit, not relying on DataHandler's auto-version on `process_datamap`: in practice the auto-versioning path silently dropped updates on live records under TYPO3 14 without ever populating `errorLog`, which meant writes would report success while nothing changed. The cmdmap path always produces a stable workspace UID we can target and surface failures through.
+
+Client-visible UIDs remain live UIDs throughout. The workspace → live mapping is hidden by `processRecord` (swaps `t3ver_oid → uid`) and by `BackendUtility::workspaceOL` applied during reads (merges workspace field values into the live row so the client sees pending edits).
+
+## Direct Updates on `sys_file_reference`
+
+Top-level `WriteTable action=update table=sys_file_reference` is permitted for metadata fields — `alternative`, `title`, `description`, `link`, `crop`, `autoplay`, and any extension-added columns. This is the efficient path for bulk A11y rollouts that set alt-text on many existing references without traversing every parent: a rollout script iterates directly over reference UIDs from `ReadTable sys_file_reference` and issues one update per row, instead of a O(n)-lookup of the parent and its FAL field for every entry.
+
+Structural fields are rejected:
+
+- `uid_local`, `uid_foreign`
+- `tablenames`, `fieldname`
+- `sorting_foreign`, `sys_language_uid`
+- `l10n_parent`, `l10n_source`
+- any `t3ver_*`
+
+Changing those would corrupt the parent ↔ reference link. If you need a different file on the same slot, or need to move a reference between parents, use the parent's FAL shortcut (`image: [{uid: <ref-uid>, file: <new-sys_file-uid>}]`) where those fields flow automatically from the parent's TCA.
+
+`pid` is also rejected on update actions (for any table, not just sys_file_reference) — pid can only be set on create.
+
+Non-existent UIDs fail fast with a clear error that names the offending table and UID; the call never reaches DataHandler. Live rows get a workspace version created on the first update (see *Workspace Versioning for Live Records* above); subsequent updates on the same reference reuse the existing workspace version rather than creating a second one.
+
+## Debug Output
+
+`WriteTable` accepts a `debug: true` input parameter. When set, the response includes a `_debug` block with DataHandler internals per phase (`datamap`, `cmdmap`, `errorLog`, `substNEWwithIDs`, `copyMappingArray`). Use it when a write silently succeeds-but-doesn't, or to trace versioning decisions. Do not leave it on in production calls — the block can be large.
+
+When the write throws an exception that would otherwise be caught and reported as a generic `"Database operation failed"` / `"Invalid input provided"` / etc., `debug=true` surfaces the real exception class, message, file, line, and a trimmed stack trace inside the `_debug.exception` entry, and the user-facing error text becomes `<ExceptionClass>: <message>`. Without `debug=true` the generic message is preserved so DBAL query strings and paths don't leak unintentionally.
+
 ## Current Implementation Status
 
-- **Read**: Implemented. `sys_file` and `sys_file_reference` are readable via `ReadTable`, and `GetTableSchema` exposes both. FAL inline fields are automatically expanded with the embedded `file` block.
-- **Link (write `sys_file_reference`)**: Planned. References will go through the workspace with an ergonomic shortcut on the parent inline field.
+- **Read**: Implemented. `sys_file` and `sys_file_reference` are readable via `ReadTable`, and `GetTableSchema` exposes both. FAL inline fields are automatically expanded with the embedded `file` block. Workspace modifications are overlaid into the response.
+- **Link (write `sys_file_reference`)**: Implemented. Both via the parent FAL shortcut and via direct `WriteTable` on `sys_file_reference` (metadata fields only). All writes go through the current workspace.
 - **Upload**: Planned. Uploads will write `sys_file` and the physical file directly to live (the exception this document describes).
 
 ## Related

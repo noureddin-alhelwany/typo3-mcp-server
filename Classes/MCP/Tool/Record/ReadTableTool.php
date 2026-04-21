@@ -8,6 +8,7 @@ use Doctrine\DBAL\ParameterType;
 use Hn\McpServer\Exception\DatabaseException;
 use Hn\McpServer\Exception\ValidationException;
 use Mcp\Types\CallToolResult;
+use TYPO3\CMS\Backend\Utility\BackendUtility;
 use TYPO3\CMS\Core\Database\ConnectionPool;
 use TYPO3\CMS\Core\Database\Query\QueryBuilder;
 use TYPO3\CMS\Core\Database\Query\Restriction\DeletedRestriction;
@@ -138,6 +139,23 @@ class ReadTableTool extends AbstractRecordTool
             }
         }
 
+        // Relation expansion is scoped to the record's type (e.g. CType on tt_content) —
+        // without the type field present in the loaded row, the serializer can't decide
+        // whether a relation field applies and falls back to the raw DB value (a counter
+        // for MM, an empty array for inline). If the user asked for a type-scoped
+        // relation field but not the type field itself, pull it in internally and strip
+        // it from the output at the end so the response shape matches what was requested.
+        $stripTypeFieldFromOutput = null;
+        if (!empty($requestedFields)) {
+            $typeField = $this->tableAccessService->getTypeFieldName($table);
+            if ($typeField && !in_array($typeField, $requestedFields, true)
+                && $this->requestedFieldsIncludeTypeScopedRelation($table, $requestedFields)
+            ) {
+                $requestedFields[] = $typeField;
+                $stripTypeFieldFromOutput = $typeField;
+            }
+        }
+
         // Validate parameters
         if ($limit < 1 || $limit > 1000) {
             throw new ValidationException(['Limit must be between 1 and 1000']);
@@ -173,6 +191,14 @@ class ReadTableTool extends AbstractRecordTool
         // Include translation metadata if requested
         if ($includeTranslationSource && $languageUid !== null && $languageUid > 0) {
             $result['translationSource'] = $this->getTranslationSourceData($result['records'], $table);
+        }
+
+        // Strip the type field if we injected it just for relation expansion.
+        if ($stripTypeFieldFromOutput !== null && !empty($result['records'])) {
+            foreach ($result['records'] as &$record) {
+                unset($record[$stripTypeFieldFromOutput]);
+            }
+            unset($record);
         }
 
         // Return the result as JSON
@@ -347,6 +373,13 @@ class ReadTableTool extends AbstractRecordTool
             throw new DatabaseException('select', $table, $e);
         }
 
+        // Overlay workspace modifications. WorkspaceRestriction returns live rows and
+        // workspace-new placeholders; workspace modifications (t3ver_oid>0) are filtered
+        // out at the SQL level. workspaceOL() merges the modified fields from the
+        // workspace version into the live row, so reads reflect pending edits. Without
+        // this step, an `alternative` edited in the workspace is invisible to the client.
+        $records = $this->overlayWorkspaceVersions($records, $table);
+
         // Process records to handle binary data, convert types, and filter default values
         $processedRecords = [];
         foreach ($records as $record) {
@@ -396,6 +429,17 @@ class ReadTableTool extends AbstractRecordTool
             // This is a new record in workspace - keep its UID as is
             // New records don't have a live counterpart until published
             // No change needed
+        }
+
+        // Strip workspace implementation details before we build the response.
+        // BackendUtility::workspaceOL overlays the workspace version onto the live
+        // row and sets `_ORIG_uid` etc. as implementation markers; `t3ver_*` columns
+        // carry the same workspace-internal state. CLAUDE.md: "workspaces must be
+        // invisible to the MCP client, for example, by only exposing the live id".
+        foreach (['_ORIG_uid', '_ORIG_pid', '_ORIG_t3ver_oid', 't3ver_oid', 't3ver_wsid',
+                  't3ver_state', 't3ver_stage', 't3ver_count', 't3ver_move_id',
+                  't3ver_tstamp'] as $hiddenField) {
+            unset($record[$hiddenField]);
         }
 
         // Ensure uid is always in the requested fields when a field list is specified
@@ -1043,7 +1087,10 @@ class ReadTableTool extends AbstractRecordTool
 
         $records = $queryBuilder->executeQuery()->fetchAllAssociative();
 
-
+        // Same overlay rationale as the main read: workspace modifications (t3ver_oid>0)
+        // are filtered by WorkspaceRestriction, so we apply workspaceOL to surface
+        // pending edits on inline children (e.g. an `alternative` edit on sys_file_reference).
+        $records = $this->overlayWorkspaceVersions($records, $table);
 
         // Process records for workspace transparency
         $processedRecords = [];
@@ -1059,6 +1106,53 @@ class ReadTableTool extends AbstractRecordTool
         }
 
         return $processedRecords;
+    }
+
+    /**
+     * True if any requested field is a TCA column whose expansion depends on the
+     * record's type (CType on tt_content, type on sys_file, etc). Covers
+     * `file`, `inline`, `select`, `category`, `group` — the cases `includeRelations`
+     * scopes via `allowedFieldsByUid`.
+     *
+     * @param array<int, string> $requestedFields
+     */
+    protected function requestedFieldsIncludeTypeScopedRelation(string $table, array $requestedFields): bool
+    {
+        $columns = $GLOBALS['TCA'][$table]['columns'] ?? [];
+        $scopedTypes = ['file', 'inline', 'select', 'category', 'group'];
+        foreach ($requestedFields as $fieldName) {
+            $fieldType = $columns[$fieldName]['config']['type'] ?? null;
+            if ($fieldType !== null && in_array($fieldType, $scopedTypes, true)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Apply `BackendUtility::workspaceOL` to each row so the client sees workspace
+     * modifications overlaid on live data. No-op in the live workspace.
+     *
+     * @param array<int, array<string, mixed>> $records
+     * @return array<int, array<string, mixed>>
+     */
+    protected function overlayWorkspaceVersions(array $records, string $table): array
+    {
+        $workspaceId = (int)($GLOBALS['BE_USER']->workspace ?? 0);
+        if ($workspaceId === 0 || empty($records)) {
+            return $records;
+        }
+        foreach ($records as &$record) {
+            BackendUtility::workspaceOL($table, $record, $workspaceId);
+            if (!is_array($record)) {
+                // workspaceOL sets $record to false when the row should be hidden
+                // (e.g. delete placeholder). Drop it from the result set.
+                continue;
+            }
+        }
+        unset($record);
+        // Remove rows where workspaceOL decided the row is no longer visible.
+        return array_values(array_filter($records, 'is_array'));
     }
 
     /**

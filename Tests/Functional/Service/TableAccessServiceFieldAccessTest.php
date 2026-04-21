@@ -48,17 +48,18 @@ class TableAccessServiceFieldAccessTest extends FunctionalTestCase
         $this->assertArrayHasKey('media', $fields, 'File field "media" must be discoverable in the schema');
     }
 
-    public function testSysFileReferenceTableIsReadable(): void
+    public function testSysFileReferenceTableIsReadableAndWritable(): void
     {
         $this->assertTrue(
             $this->service->canReadTable('sys_file_reference'),
             'sys_file_reference must be readable (it is workspace-capable and exposes file links)'
         );
 
-        // Writes are gated behind the read-only flag until PR 2 introduces the FAL linking shortcut.
+        // PR 2 unlocks the FAL linking shortcut: sys_file_reference is now writable
+        // in the current workspace alongside the rest of the content graph.
         $accessInfo = $this->service->getTableAccessInfo('sys_file_reference', false);
-        $this->assertTrue($accessInfo['read_only'], 'sys_file_reference must still be read-only in PR 1 scope');
-        $this->assertFalse($accessInfo['permissions']['write'] ?? true, 'Writes must be blocked until the linking shortcut lands');
+        $this->assertFalse($accessInfo['read_only'], 'sys_file_reference must be writable with PR 2');
+        $this->assertTrue($accessInfo['permissions']['write'] ?? false, 'Writes must be enabled via the linking shortcut');
     }
 
     public function testSysFileTableIsReadableButNotWorkspaceCapable(): void

@@ -272,23 +272,23 @@ class WriteTableToolErrorTest extends FunctionalTestCase
     }
     
     /**
-     * Test that file fields are not supported
+     * Type=file fields accept the FAL linking-shortcut array shape (PR 2).
+     * Scalar input is still rejected — that path would silently write garbage.
      */
-    public function testFileFieldsNotSupported(): void
+    public function testFileFieldRejectsScalarInput(): void
     {
-        // The 'media' field on pages table is type='file', which is not supported
         $result = $this->tool->execute([
             'action' => 'create',
             'table' => 'pages',
             'pid' => 0,
             'data' => [
                 'title' => 'Test Page',
-                'media' => 'some_value' // File fields should be rejected regardless of value
-            ]
+                'media' => 'some_value', // scalar, not a list of references
+            ],
         ]);
 
-        $this->assertTrue($result->isError, 'File fields should be rejected');
-        $this->assertStringContainsString('File fields are not supported', $result->content[0]->text);
+        $this->assertTrue($result->isError, 'Scalar input on a file field should be rejected');
+        $this->assertStringContainsString('FAL linking shortcut', $result->content[0]->text);
         $this->assertStringContainsString('media', $result->content[0]->text);
     }
     
@@ -313,25 +313,26 @@ class WriteTableToolErrorTest extends FunctionalTestCase
     }
     
     /**
-     * Test updating non-existent record
+     * Updating a non-existent record now fails fast with a clear error that
+     * includes the offending UID. Previously it was a silent no-op, which
+     * turned a caller mistake into a confusing success.
      */
     public function testUpdateNonExistentRecord(): void
     {
         $result = $this->tool->execute([
             'action' => 'update',
             'table' => 'pages',
-            'uid' => 99999, // Non-existent UID
-            'data' => [
-                'title' => 'Updated Title'
-            ]
+            'uid' => 99999,
+            'data' => ['title' => 'Updated Title'],
         ]);
-        
-        // The tool should handle this gracefully - DataHandler will fail
-        $this->assertFalse($result->isError, json_encode($result->jsonSerialize()));
-        
-        // But the record shouldn't actually be created
+
+        $this->assertTrue($result->isError, 'update on a missing UID must report an error');
+        $this->assertStringContainsString('99999', $result->content[0]->text);
+        $this->assertStringContainsString('not found', $result->content[0]->text);
+
+        // No phantom record created as a side effect.
         $record = BackendUtility::getRecord('pages', 99999);
-        $this->assertNull($record, 'Non-existent record should not be created');
+        $this->assertNull($record, 'Non-existent record must not be created by the failed update');
     }
     
     /**

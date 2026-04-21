@@ -45,7 +45,7 @@ All these operations happen safely in workspaces, giving you full control to rev
 | **Page Content Discovery** | ✅ Ready         | Similar to the List or Page module with backend layout support                                                |
 | **Record Reading/Writing** | ✅ Ready         | Read and write any workspace-capable TYPO3 table (core & extensions) with full schema inspection              |
 | **Content Translation**    | ⚠️ Experimental | Implemented, needs real-world testing                                                                         |
-| **Fileadmin Support**      | ❌ Missing       | Planned — see [FAL.md](Documentation/Architecture/FAL.md) for the workspace-safety policy                    |
+| **Fileadmin Support**      | ⚠️ Partial       | Read + link existing files via the FAL linking shortcut; upload still missing — see [FAL.md](Documentation/Architecture/FAL.md) |
 | **Workspace Selection**    | ❌ Missing       | Currently uses the first writable workspace of the user                                                       |
 
 While there are a lot of automated tests, and even some [LLM test](Tests/Llm/README.md), TYPO3 instances are widely different and Language Models are also widely different. Feel free to [create issues here on GitHub](https://github.com/logiscape/mcp-sdk-php/issues) or [share experiences in the typo3-core-ai channel](https://typo3.slack.com/archives/C091M0M7BL6). 
