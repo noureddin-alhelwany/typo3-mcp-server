@@ -108,9 +108,9 @@ $writeTool->execute([
 - **Working Example**: Creating news with embedded links now works correctly
 
 ### 2. Restricted Tables
-- `sys_file_reference` is intentionally restricted in MCP tools because file references don't properly support workspaces
-- This is a deliberate limitation for now to ensure data integrity in workspace contexts
-- File uploads and media management require special handling outside of MCP tools
+- `sys_file_reference` is currently restricted in MCP tools. It *is* workspace-capable, but without a write path into `sys_file` there is no safe way to create new file links.
+- Once FAL upload support lands, `sys_file_reference` moves through the workspace like any other content record; only `sys_file` itself (not workspace-capable) is written to live.
+- See [FAL.md](FAL.md) for the full policy.
 
 ### 3. Automatic Workspace Handling
 - Both ReadTableTool and WriteTableTool automatically initialize workspace context via `WorkspaceContextService`
@@ -165,7 +165,7 @@ $connection->update('child_table', ['parent_field' => $parentUid], ['uid' => $ch
 
 ## Future Improvements
 
-1. **File Reference Support**: Add special handling for sys_file_reference when workspace support improves
+1. **File Reference Support**: Enable `sys_file_reference` writes alongside the planned FAL upload tool. See [FAL.md](FAL.md).
 2. **Batch Operations**: Support for bulk inline relation updates
 3. **Position Management**: Full support for positioning inline records (before/after specific records)
 4. **Validation Enhancement**: More comprehensive validation for embedded record data

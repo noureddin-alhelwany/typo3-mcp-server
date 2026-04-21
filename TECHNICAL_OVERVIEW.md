@@ -89,11 +89,13 @@ Everything in TYPO3 revolves around pages, and the MCP Server embraces this. Mos
 - URLs map to pages
 
 ### 7. Safety by Default
-No direct modifications to live data are possible. Every change:
+No direct modifications to live *content* data are possible. Every content change:
 - Goes through TYPO3's DataHandler
 - Is created in a workspace
 - Must be explicitly published
 - Can be reviewed before going live
+
+**FAL boundary**: File uploads necessarily write the physical file and the `sys_file` record directly to live — `sys_file` is not a workspace-capable table in TYPO3. The content-linking layer (`sys_file_reference`) still goes through the workspace, so no page or content element references a newly uploaded file until the workspace is published. See [FAL.md](Documentation/Architecture/FAL.md).
 
 ### 8. Thoughtful Data Representation
 The complexity of TYPO3 is hidden through carefully crafted data representations. Rather than simply dumping JSON, we thoughtfully curate what the AI sees:
@@ -253,7 +255,7 @@ Relations are transparently resolved and can be set using simple syntax:
 - **Select relations**: Use comma-separated IDs or arrays
 - **Inline relations**: Provide as nested objects
 - **MM relations**: Handled automatically
-- **File references**: Currently read-only
+- **File references**: Currently read-only (see [FAL.md](Documentation/Architecture/FAL.md) for the planned upload + linking approach)
 - **Bidirectional**: Updates both sides as needed
 
 ### Language Support
@@ -318,6 +320,7 @@ While the MCP Server is powerful, some features are still in development:
 - Currently read-only access to file references
 - Cannot upload new files or modify existing ones
 - Workaround: Reference existing files by ID
+- Planned: the architecture and workspace-safety boundary are specified in [FAL.md](Documentation/Architecture/FAL.md); the upload tool itself is not yet implemented.
 
 ### Direct Workspace Management
 - Cannot create/delete workspaces
