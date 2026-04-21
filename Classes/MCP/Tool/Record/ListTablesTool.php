@@ -38,8 +38,10 @@ class ListTablesTool extends AbstractRecordTool
     protected function doExecute(array $params): CallToolResult
     {
         
-        // Get all accessible tables from TableAccessService (include all, regardless of read-only status)
-        $tables = $this->tableAccessService->getAccessibleTables(true);
+        // Use the read-broad lens so non-workspace-capable but readable tables
+        // (sys_file, sys_file_storage, …) appear with the [READ-ONLY] marker instead
+        // of being silently hidden. Matches ReadTable's input enum.
+        $tables = $this->tableAccessService->getReadableTables();
         
         // Convert to the expected format
         $formattedTables = $this->formatAccessibleTables($tables);
@@ -112,8 +114,9 @@ class ListTablesTool extends AbstractRecordTool
         $result = "ACCESSIBLE TABLES IN TYPO3 (via MCP)\n";
         $result .= "=====================================\n\n";
         
-        $result .= "All tables listed are workspace-capable and accessible by the current user.\n";
-        $result .= "Tables marked as [READ-ONLY] can be read but not modified.\n\n";
+        $result .= "All tables listed are accessible by the current user.\n";
+        $result .= "Tables marked as [READ-ONLY] can be read but not modified —\n";
+        $result .= "this includes FAL tables (sys_file, sys_file_storage) which are not workspace-capable.\n\n";
         
         foreach ($groupedTables as $extension => $extensionInfo) {
             $extensionLabel = $extensionInfo['extensionLabel'];
@@ -187,7 +190,7 @@ class ListTablesTool extends AbstractRecordTool
         }
         
         // File-related tables
-        if (in_array($table, ['sys_file', 'sys_file_reference', 'sys_file_metadata'])) {
+        if (in_array($table, ['sys_file', 'sys_file_reference', 'sys_file_metadata', 'sys_file_storage'])) {
             return 'file';
         }
         

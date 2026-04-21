@@ -146,6 +146,15 @@ class TcaFormattingUtility
                     $result .= " [foreign table: " . $config['foreign_table'] . "]";
                 }
                 break;
+
+            case 'file':
+                // TYPO3 13/14 type=file is a sys_file_reference inline relation with implicit wiring
+                $foreignTable = $config['foreign_table'] ?? 'sys_file_reference';
+                $result .= " [foreign table: " . $foreignTable . "]";
+                if (!empty($config['allowed'])) {
+                    $result .= " [allowed: " . $config['allowed'] . "]";
+                }
+                break;
                 
             case 'flex':
                 // Only applicable for TCA

@@ -1,3 +1,4 @@
 "sys_file"
-,"uid","pid","name","identifier","storage","type","size"
-,1,0,"test.jpg","/test.jpg",1,2,123456
+,"uid","pid","tstamp","name","identifier","identifier_hash","folder_hash","storage","type","mime_type","extension","size","sha1"
+,1,0,1734875000,"test.jpg","/test.jpg","1111111111111111111111111111111111111111","2222222222222222222222222222222222222222",1,2,"image/jpeg","jpg",123456,"3333333333333333333333333333333333333333"
+,2,0,1734875000,"hero.png","/images/hero.png","4444444444444444444444444444444444444444","5555555555555555555555555555555555555555",1,2,"image/png","png",78910,"6666666666666666666666666666666666666666"

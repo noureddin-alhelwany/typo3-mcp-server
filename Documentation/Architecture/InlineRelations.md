@@ -107,9 +107,10 @@ $writeTool->execute([
 - **Solution**: After DataHandler creates child records, we directly update the foreign field in the database
 - **Working Example**: Creating news with embedded links now works correctly
 
-### 2. Restricted Tables
-- `sys_file_reference` is currently restricted in MCP tools. It *is* workspace-capable, but without a write path into `sys_file` there is no safe way to create new file links.
-- Once FAL upload support lands, `sys_file_reference` moves through the workspace like any other content record; only `sys_file` itself (not workspace-capable) is written to live.
+### 2. FAL Tables (`sys_file`, `sys_file_reference`)
+- `sys_file` and `sys_file_reference` are readable. Inline FAL fields on content records (e.g., `tt_content.image`) are expanded so each reference carries the full `sys_file` record under `file`.
+- `sys_file` stays read-only because it is not workspace-capable — it is filesystem-backed and edited via the planned upload tool, not via direct DB writes.
+- `sys_file_reference` is temporarily read-only via MCP tools. Write support lands together with the FAL linking shortcut; when it does, references move through the workspace like any other content record.
 - See [FAL.md](FAL.md) for the full policy.
 
 ### 3. Automatic Workspace Handling

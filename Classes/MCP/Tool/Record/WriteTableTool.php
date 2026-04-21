@@ -695,12 +695,15 @@ class WriteTableTool extends AbstractRecordTool
                 continue;
             }
 
-            // Check if field is accessible (filters out file fields and inaccessible inline relations)
+            // Reject type=file fields explicitly — they are readable (FAL expansion in ReadTable)
+            // but writing them requires the FAL linking shortcut that lands in a follow-up PR.
+            $fieldType = $fieldConfig['config']['type'] ?? '';
+            if ($fieldType === 'file') {
+                return "Field '{$fieldName}': File fields are not supported. Please use TYPO3 backend for file operations.";
+            }
+
+            // Check if field is accessible (filters out inaccessible inline relations)
             if (!$this->tableAccessService->canAccessField($table, $fieldName)) {
-                $fieldType = $fieldConfig['config']['type'] ?? '';
-                if ($fieldType === 'file') {
-                    return "Field '{$fieldName}': File fields are not supported. Please use TYPO3 backend for file operations.";
-                }
                 return "Field '{$fieldName}' is not accessible";
             }
 

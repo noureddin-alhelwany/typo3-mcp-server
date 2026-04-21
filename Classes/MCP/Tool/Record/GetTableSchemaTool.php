@@ -20,9 +20,10 @@ class GetTableSchemaTool extends AbstractRecordTool
      */
     public function getSchema(): array
     {
-        // Get all accessible tables for enum
-        $accessibleTables = $this->tableAccessService->getAccessibleTables(true);
-        $tableNames = array_keys($accessibleTables);
+        // Get all readable tables for enum. Reading is a superset of writing —
+        // includes non-workspace-capable tables like sys_file (FAL boundary).
+        $readableTables = $this->tableAccessService->getReadableTables();
+        $tableNames = array_keys($readableTables);
         sort($tableNames);
 
         return [

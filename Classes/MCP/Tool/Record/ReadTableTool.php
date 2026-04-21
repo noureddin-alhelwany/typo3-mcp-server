@@ -39,9 +39,10 @@ class ReadTableTool extends AbstractRecordTool
         $availableLanguages = $this->languageService->getAvailableIsoCodes();
         $hasMultipleLanguages = count($availableLanguages) > 1;
 
-        // Get all accessible tables for enum
-        $accessibleTables = $this->tableAccessService->getAccessibleTables(true);
-        $tableNames = array_keys($accessibleTables);
+        // Get all readable tables for enum. Reading is a superset of writing —
+        // includes non-workspace-capable tables like sys_file (FAL boundary).
+        $readableTables = $this->tableAccessService->getReadableTables();
+        $tableNames = array_keys($readableTables);
         sort($tableNames); // Sort alphabetically for better readability
 
         // Build the base properties
@@ -652,6 +653,27 @@ class ReadTableTool extends AbstractRecordTool
         // Get all record UIDs
         $recordUids = array_column($result['records'], 'uid');
 
+        // Precompute which TCA fields each record's type is allowed to expose.
+        // TYPO3 sub-schemas (CType on tt_content, type on sys_file, etc.) scope field
+        // visibility to the record type — without this filter we'd attach `assets` or
+        // `media` to a CType=image row just because the parent table declares them.
+        $typeField = $this->tableAccessService->getTypeFieldName($table);
+        $fieldsByType = [];
+        $allowedFieldsByUid = [];
+        foreach ($result['records'] as $record) {
+            $uid = $record['uid'] ?? null;
+            if ($uid === null) {
+                continue;
+            }
+            $typeValue = ($typeField && isset($record[$typeField])) ? (string)$record[$typeField] : '';
+            if (!isset($fieldsByType[$typeValue])) {
+                $fieldsByType[$typeValue] = array_flip(
+                    $this->tableAccessService->getFieldNamesForType($table, $typeValue)
+                );
+            }
+            $allowedFieldsByUid[(int)$uid] = $fieldsByType[$typeValue];
+        }
+
         // Process each field that might contain relations
         foreach ($tca['columns'] as $fieldName => $fieldConfig) {
             // Skip relations for fields not in the requested field list
@@ -661,9 +683,25 @@ class ReadTableTool extends AbstractRecordTool
 
             $fieldType = $fieldConfig['config']['type'] ?? '';
 
+            // For type-scoped relation fields, only process the records whose type
+            // actually exposes this field. Non-type-scoped relations (select/category)
+            // keep the full record set — they're filtered by stored value, not by type.
+            $applicableUids = [];
+            foreach ($recordUids as $uid) {
+                if (isset($allowedFieldsByUid[(int)$uid][$fieldName])) {
+                    $applicableUids[] = (int)$uid;
+                }
+            }
+
             match ($fieldType) {
                 'select', 'category' => $this->includeSelectRelations($result['records'], $fieldName, $fieldConfig, $table),
-                'inline' => $this->includeInlineRelations($result['records'], $fieldName, $fieldConfig, $recordUids),
+                'inline' => $this->includeInlineRelations($result['records'], $fieldName, $fieldConfig, $applicableUids),
+                'file' => $this->includeInlineRelations(
+                    $result['records'],
+                    $fieldName,
+                    $this->fileFieldToInlineConfig($fieldConfig, $table, $fieldName),
+                    $applicableUids
+                ),
                 default => null,
             };
         }
@@ -788,10 +826,15 @@ class ReadTableTool extends AbstractRecordTool
 
     /**
      * Include inline field relations
+     *
+     * @param array<int> $applicableUids UIDs this field applies to. Records outside
+     *     this set (e.g. a tt_content row whose CType doesn't include this field)
+     *     are left untouched so CType=image doesn't accidentally expose `assets` or
+     *     `media`.
      */
-    protected function includeInlineRelations(array &$records, string $fieldName, array $fieldConfig, array $recordUids): void
+    protected function includeInlineRelations(array &$records, string $fieldName, array $fieldConfig, array $applicableUids): void
     {
-        if (empty($fieldConfig['config']['foreign_table'])) {
+        if (empty($fieldConfig['config']['foreign_table']) || empty($applicableUids)) {
             return;
         }
 
@@ -799,7 +842,7 @@ class ReadTableTool extends AbstractRecordTool
         $foreignField = $fieldConfig['config']['foreign_field'] ?? '';
 
         // Skip if the foreign table isn't accessible or no foreign field
-        if (!$this->tableAccessService->canAccessTable($foreignTable) || empty($foreignField)) {
+        if (!$this->tableAccessService->canReadTable($foreignTable) || empty($foreignField)) {
             return;
         }
 
@@ -807,9 +850,21 @@ class ReadTableTool extends AbstractRecordTool
         $foreignTableTCA = $GLOBALS['TCA'][$foreignTable] ?? [];
         $isHiddenTable = ($foreignTableTCA['ctrl']['hideTable'] ?? false) === true;
 
+        // Narrow the child query by foreign_match_fields (e.g. for sys_file_reference:
+        // tablenames + fieldname). Without this, references with a colliding uid_foreign
+        // from unrelated parent tables or sibling fields leak into the result.
+        $matchFields = $fieldConfig['config']['foreign_match_fields'] ?? [];
+
         // Get all related records
         $foreignSortBy = $fieldConfig['config']['foreign_sortby'] ?? '';
-        $relatedRecords = $this->getInlineRelatedRecords($foreignTable, $foreignField, $recordUids, $foreignSortBy);
+        $applicableUids = array_values(array_unique(array_map('intval', $applicableUids)));
+        $relatedRecords = $this->getInlineRelatedRecords(
+            $foreignTable,
+            $foreignField,
+            $applicableUids,
+            $foreignSortBy,
+            $matchFields
+        );
 
         // Group related records by parent record
         $groupedRecords = [];
@@ -823,33 +878,122 @@ class ReadTableTool extends AbstractRecordTool
             }
         }
 
+        // FAL boundary: for sys_file_reference children, resolve uid_local to the full
+        // sys_file record and attach it as `file`. Keeps uid_local in place so the raw
+        // reference shape is still visible.
+        if ($isHiddenTable && $foreignTable === 'sys_file_reference') {
+            foreach ($groupedRecords as &$references) {
+                foreach ($references as &$reference) {
+                    $fileUid = isset($reference['uid_local']) ? (int)$reference['uid_local'] : 0;
+                    if ($fileUid > 0) {
+                        $file = $this->loadSysFileRecord($fileUid);
+                        if ($file !== null) {
+                            $reference['file'] = $file;
+                        }
+                    }
+                }
+                unset($reference);
+            }
+            unset($references);
+        }
+
+        $applicableUidSet = array_flip($applicableUids);
+
         // Add related records to each record
         foreach ($records as &$record) {
             $uid = $record['uid'] ?? null;
-            if ($uid !== null) {
-                if (isset($groupedRecords[$uid]) && !empty($groupedRecords[$uid])) {
-                    if ($isHiddenTable) {
-                        // Embed full records for hidden tables (like sys_file_reference)
-                        $record[$fieldName] = $groupedRecords[$uid];
-                    } else {
-                        // Return only UIDs for independent tables (like tt_content)
-                        $record[$fieldName] = array_column($groupedRecords[$uid], 'uid');
-                    }
+            if ($uid === null || !isset($applicableUidSet[(int)$uid])) {
+                continue;
+            }
+            if (isset($groupedRecords[$uid]) && !empty($groupedRecords[$uid])) {
+                if ($isHiddenTable) {
+                    // Embed full records for hidden tables (like sys_file_reference)
+                    $record[$fieldName] = $groupedRecords[$uid];
                 } else {
-                    // Initialize as empty array if field exists in record but no relations found
-                    if (array_key_exists($fieldName, $record)) {
-                        $record[$fieldName] = [];
-                    }
+                    // Return only UIDs for independent tables (like tt_content)
+                    $record[$fieldName] = array_column($groupedRecords[$uid], 'uid');
+                }
+            } else {
+                // Initialize as empty array if field exists in record but no relations found
+                if (array_key_exists($fieldName, $record)) {
+                    $record[$fieldName] = [];
                 }
             }
         }
     }
 
     /**
-     * Get inline related records
+     * Translate a TYPO3 13/14 `type=file` TCA config into the equivalent inline config
+     * so the existing sys_file_reference inline pipeline can handle it.
      */
-    protected function getInlineRelatedRecords(string $table, string $foreignField, array $parentUids, string $foreignSortBy = ''): array
+    protected function fileFieldToInlineConfig(array $fieldConfig, string $parentTable, string $fieldName): array
     {
+        $config = $fieldConfig['config'] ?? [];
+        $inlineConfig = [
+            'type' => 'inline',
+            'foreign_table' => $config['foreign_table'] ?? 'sys_file_reference',
+            'foreign_field' => $config['foreign_field'] ?? 'uid_foreign',
+            'foreign_sortby' => $config['foreign_sortby'] ?? 'sorting_foreign',
+            'foreign_table_field' => $config['foreign_table_field'] ?? 'tablenames',
+            'foreign_match_fields' => array_merge(
+                ['fieldname' => $fieldName, 'tablenames' => $parentTable],
+                $config['foreign_match_fields'] ?? []
+            ),
+        ];
+        return ['config' => $inlineConfig];
+    }
+
+    /**
+     * Load a sys_file record by UID for FAL expansion inside sys_file_reference embeds.
+     *
+     * sys_file is not workspace-capable, so we only apply DeletedRestriction.
+     */
+    protected function loadSysFileRecord(int $sysFileUid): ?array
+    {
+        if ($sysFileUid <= 0) {
+            return null;
+        }
+
+        $queryBuilder = GeneralUtility::makeInstance(ConnectionPool::class)
+            ->getQueryBuilderForTable('sys_file');
+        $queryBuilder->getRestrictions()
+            ->removeAll()
+            ->add(GeneralUtility::makeInstance(DeletedRestriction::class));
+
+        $record = $queryBuilder
+            ->select('*')
+            ->from('sys_file')
+            ->where(
+                $queryBuilder->expr()->eq(
+                    'uid',
+                    $queryBuilder->createNamedParameter($sysFileUid, ParameterType::INTEGER)
+                )
+            )
+            ->executeQuery()
+            ->fetchAssociative();
+
+        if (!$record) {
+            return null;
+        }
+
+        return $this->processRecord($record, 'sys_file');
+    }
+
+    /**
+     * Get inline related records
+     *
+     * @param array<string, string> $matchFields Extra WHERE conditions (column => value).
+     *     For sys_file_reference this MUST include `tablenames` and `fieldname` —
+     *     otherwise references from other parent tables/fields with a colliding
+     *     uid_foreign bleed into the result.
+     */
+    protected function getInlineRelatedRecords(
+        string $table,
+        string $foreignField,
+        array $parentUids,
+        string $foreignSortBy = '',
+        array $matchFields = []
+    ): array {
         if (empty($parentUids)) {
             return [];
         }
@@ -876,17 +1020,28 @@ class ReadTableTool extends AbstractRecordTool
         }
 
 
-        // Ensure we have the sort field in our select
-        $records = $queryBuilder->select('*')
+        $queryBuilder->select('*')
             ->from($table)
             ->where(
                 $queryBuilder->expr()->in(
                     $foreignField,
                     $queryBuilder->createNamedParameter($parentUids, \TYPO3\CMS\Core\Database\Connection::PARAM_INT_ARRAY)
                 )
-            )
-            ->executeQuery()
-            ->fetchAllAssociative();
+            );
+
+        foreach ($matchFields as $column => $value) {
+            if ($column === '') {
+                continue;
+            }
+            $queryBuilder->andWhere(
+                $queryBuilder->expr()->eq(
+                    $column,
+                    $queryBuilder->createNamedParameter((string)$value)
+                )
+            );
+        }
+
+        $records = $queryBuilder->executeQuery()->fetchAllAssociative();
 
 
 

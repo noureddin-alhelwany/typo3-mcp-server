@@ -37,7 +37,46 @@ By contrast, `sys_file_reference` **is** workspace-capable (standard TYPO3 confi
 - Tools that link files to content (create / update `sys_file_reference`, or update inline file fields on records) operate on the current workspace as normal.
 - Orphan-file cleanup (uploaded but never linked) is out of scope for now; see TYPO3 scheduler / file abstraction cleanup tasks.
 
+## Read Shape
+
+`ReadTable` returns FAL inline fields as an array of references, with the target `sys_file` embedded as `file`:
+
+```json
+{
+  "uid": 120,
+  "CType": "image",
+  "image": [
+    {
+      "uid": 500,
+      "uid_local": 1,
+      "tablenames": "tt_content",
+      "fieldname": "image",
+      "alternative": "Hero alt text",
+      "title": "Hero image title",
+      "crop": {},
+      "link": "",
+      "file": {
+        "uid": 1,
+        "identifier": "/test.jpg",
+        "name": "test.jpg",
+        "mime_type": "image/jpeg",
+        "extension": "jpg",
+        "size": 123456
+      }
+    }
+  ]
+}
+```
+
+The reference `uid` is always the live UID — workspace overlays swap `t3ver_oid → uid` before the record is serialised, so the client never sees workspace IDs. `sys_file` is not workspace-capable and is therefore loaded directly from live.
+
+## Current Implementation Status
+
+- **Read**: Implemented. `sys_file` and `sys_file_reference` are readable via `ReadTable`, and `GetTableSchema` exposes both. FAL inline fields are automatically expanded with the embedded `file` block.
+- **Link (write `sys_file_reference`)**: Planned. References will go through the workspace with an ergonomic shortcut on the parent inline field.
+- **Upload**: Planned. Uploads will write `sys_file` and the physical file directly to live (the exception this document describes).
+
 ## Related
 
 - [WorkspaceTransparency.md](WorkspaceTransparency.md) — how workspace overlays are hidden from the MCP client
-- [InlineRelations.md](InlineRelations.md) — why `sys_file_reference` is currently restricted and when it will be enabled
+- [InlineRelations.md](InlineRelations.md) — `sys_file_reference` in the context of general inline-relation handling

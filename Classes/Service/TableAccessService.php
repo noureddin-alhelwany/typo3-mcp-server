@@ -194,15 +194,20 @@ class TableAccessService implements SingletonInterface
      */
     public function validateTableAccess(string $table, string $operation = 'read'): void
     {
-        $accessInfo = $this->getTableAccessInfo($table);
-        
+        // Read operations don't require workspace capability. sys_file and other
+        // non-workspace-capable tables expose live data directly (FAL boundary — see
+        // Documentation/Architecture/FAL.md); blocking them here would hide legitimate
+        // read access behind a write-only gate.
+        $requireWorkspaceCapability = $operation !== 'read';
+        $accessInfo = $this->getTableAccessInfo($table, $requireWorkspaceCapability);
+
         if (!$accessInfo['accessible']) {
             $reasons = implode(', ', $accessInfo['reasons']);
             throw new \InvalidArgumentException(
                 "Cannot access table '{$table}': {$reasons}"
             );
         }
-        
+
         // Check specific operation permission
         if ($operation !== 'read' && !$accessInfo['permissions'][$operation]) {
             throw new \InvalidArgumentException(
@@ -430,8 +435,10 @@ class TableAccessService implements SingletonInterface
                 'sys_file_storage', // File storage configuration
                 'sys_domain', // Domain configuration
                 'sys_category', // Category system - safe for read operations
+                'sys_file', // FAL file records — read-only, not workspace-capable (see FAL.md)
+                'sys_file_reference', // FAL references — workspace-capable, readable here; writes gated by isTableReadOnly
             ];
-            
+
             if (!in_array($table, $allowedRootTables)) {
                 return true;
             }
@@ -452,7 +459,6 @@ class TableAccessService implements SingletonInterface
             'cache_hash', // Cache tables - managed by system
             'sys_be_shortcuts', // User shortcuts - user-specific
             'sys_news', // System news - admin-only
-            'sys_file_reference', // FAL reference table - file handling not supported yet
         ];
         
         if (in_array($table, $restrictedTables)) {
@@ -490,6 +496,7 @@ class TableAccessService implements SingletonInterface
             'sys_file_processedfile', // Processed files are generated automatically
             'sys_file_storage', // Storage configuration - sensitive
             'sys_file_metadata', // File metadata - usually auto-generated
+            'sys_file_reference', // Readable now; writes land in a follow-up PR with the FAL linking shortcut
         ];
         
         if (in_array($table, $readOnlyTables)) {
@@ -604,20 +611,14 @@ class TableAccessService implements SingletonInterface
     {
         $fieldConfig = $GLOBALS['TCA'][$table]['columns'][$fieldName] ?? [];
 
-        // Block file fields - file handling not supported yet
+        // Block inline and file relations where the foreign table isn't reachable.
+        // TYPO3 13/14 `type=file` is the modern shorthand for sys_file_reference
+        // inline relations — treat it the same way for access decisions.
         $fieldType = $fieldConfig['config']['type'] ?? '';
-        if ($fieldType === 'file') {
-            return false;
-        }
-
-        // Block inline relations where foreign table isn't writable
-        // This automatically filters out relations to:
-        // - Tables without workspace support
-        // - Read-only tables (sys_file, sys_file_metadata, etc.)
-        // - Tables with no user access
-        if ($fieldType === 'inline') {
-            $foreignTable = $fieldConfig['config']['foreign_table'] ?? '';
-            if ($foreignTable && !$this->canAccessTable($foreignTable)) {
+        if ($fieldType === 'inline' || $fieldType === 'file') {
+            $foreignTable = $fieldConfig['config']['foreign_table']
+                ?? ($fieldType === 'file' ? 'sys_file_reference' : '');
+            if ($foreignTable && !$this->canReadTable($foreignTable)) {
                 return false;
             }
         }

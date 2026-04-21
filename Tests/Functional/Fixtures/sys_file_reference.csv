@@ -1,0 +1,8 @@
+"sys_file_reference"
+,"uid","pid","tstamp","crdate","sys_language_uid","uid_local","uid_foreign","tablenames","fieldname","sorting_foreign","title","alternative","description","link","crop"
+,500,1,1734875000,1734875000,0,1,120,"tt_content","image",1,"Hero image title","Hero alt text","Hero description","","{}"
+,501,1,1734875000,1734875000,0,2,121,"tt_content","image",1,"First gallery image","Gallery alt 1","","","{}"
+,502,1,1734875000,1734875000,0,1,121,"tt_content","image",2,"Second gallery image","Gallery alt 2","","t3://page?uid=2","{}"
+,600,1,1734875000,1734875000,0,1,100,"tt_content","image",1,"Textmedia image ref","Textmedia img alt","","","{}"
+,601,1,1734875000,1734875000,0,2,100,"tt_content","assets",1,"Textmedia asset ref","Textmedia asset alt","","","{}"
+,602,1,1734875000,1734875000,0,2,120,"bogus_other_table","image",5,"Collision ref","Must not leak into tt_content 120","","","{}"

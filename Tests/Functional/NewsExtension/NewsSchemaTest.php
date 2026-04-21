@@ -125,20 +125,25 @@ class NewsSchemaTest extends FunctionalTestCase
     }
 
     /**
-     * Test that News uses sys_file_reference for media (but it's restricted)
+     * PR 1 lifted the "restricted" lock on sys_file_reference (see
+     * Documentation/Architecture/FAL.md). Accessing the schema must no longer
+     * surface a restriction error — GetTableSchema's own subschema/type handling
+     * may still report other shortcomings, but that is unrelated to FAL policy.
      */
     public function testNewsUsesSysFileReferenceForMedia(): void
     {
         $tool = new GetTableSchemaTool();
-        
-        // News extends sys_file_reference, but this table is restricted
+
         $result = $tool->execute([
             'table' => 'sys_file_reference'
         ]);
-        
-        // sys_file_reference is restricted for security reasons
-        $this->assertTrue($result->isError);
-        $this->assertStringContainsString('restricted', $result->content[0]->text);
+
+        $this->assertFalse($result->isError, json_encode($result->jsonSerialize()));
+        $this->assertStringNotContainsString(
+            'restricted for security',
+            $result->content[0]->text,
+            'sys_file_reference must no longer be treated as a security-restricted table'
+        );
     }
 
     /**
