@@ -124,6 +124,9 @@ The MCP Server provides these tools for interacting with TYPO3:
 ### Content Modification
 - **WriteTable** - Create, update, or delete records (safely in workspace)
 
+### Workflow & Preview
+- **GeneratePreviewLink** - Create a shareable frontend preview URL of a workspace draft for review without backend login (see [Preview.md](Documentation/Architecture/Preview.md))
+
 ### File Management
 - **ListFolders** - List subfolders of a FAL storage folder to discover where uploads should land
 - **CreateFolder** - Create a folder (idempotently, with optional recursive intermediate creation) before uploading
@@ -357,9 +360,10 @@ For complex tasks, break them into smaller steps:
 
 ### Understand the Publishing Workflow
 Remember that all changes need your approval:
-1. AI creates/modifies content in workspace
-2. You review in TYPO3 Backend → Workspaces
-3. You publish approved changes
-4. Content goes live on your site
+1. AI creates/modifies content in workspace (`WriteTable`)
+2. Optionally, hand a reviewer a shareable preview URL (`GeneratePreviewLink`) — they see the draft in the frontend without a backend login
+3. You review in TYPO3 Backend → Workspaces
+4. You publish approved changes
+5. Content goes live on your site
 
-This workflow ensures you maintain full control while benefiting from AI efficiency.
+This workflow ensures you maintain full control while benefiting from AI efficiency. See [Preview.md](Documentation/Architecture/Preview.md) for details on how preview links work.
