@@ -125,6 +125,8 @@ The MCP Server provides these tools for interacting with TYPO3:
 - **WriteTable** - Create, update, or delete records (safely in workspace)
 
 ### File Management
+- **ListFolders** - List subfolders of a FAL storage folder to discover where uploads should land
+- **CreateFolder** - Create a folder (idempotently, with optional recursive intermediate creation) before uploading
 - **UploadFile** - Upload a binary file into a FAL storage and create the matching `sys_file` row (written to live per the FAL exception; linking stays in workspace via `WriteTable`)
 
 > Each tool provides detailed schema information when called. See the Real-World Scenarios below for practical examples.

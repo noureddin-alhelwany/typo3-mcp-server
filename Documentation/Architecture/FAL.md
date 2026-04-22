@@ -186,11 +186,32 @@ The returned `uid` is the live `sys_file.uid` and can be fed straight into the F
 
 No `sys_file_reference` row is created by `UploadFile` — linking is a separate step and stays in the workspace.
 
+## Folder Management
+
+Two tools let the client discover and shape the folder layout before uploading:
+
+- `ListFolders` — reads live. Lists the subfolders of a given storage folder with their file and direct-child counts, so the client can decide where to drop files. Recursive listings are capped at 10 levels deep to protect against symlink loops.
+- `CreateFolder` — writes live, **idempotent**. Creates missing folders (recursively by default). Re-running on an existing path returns success with `created: []` instead of an error — there is no "already exists" failure mode. Path depth is capped at 10 segments to prevent accidental mass-creation.
+
+Typical FAL sequence the tools encourage:
+
+```
+ListFolders           →   discover layout
+CreateFolder          →   only if the target is missing
+UploadFile            →   writes sys_file + physical file (live)
+WriteTable image:[{file: <uid>, …}]   →   link, stays in the workspace
+```
+
+`ListFolders` and `CreateFolder` both fall under the same FAL exception as `UploadFile`: the `sys_file_storage` infrastructure is not workspace-capable, so folder operations happen live. They rely on TYPO3 core APIs (`ResourceStorage::hasFolder`, `getFolder`, `createFolder`, `Folder::getSubfolders`) — no direct filesystem access — so BE-user filemounts and permission checks are enforced by the core.
+
+Path traversal (`..` segments) is rejected on the MCP side before the core check, so the error message stays clear. Double slashes (`/foo//bar/`) are rejected as empty segments rather than silently collapsed.
+
 ## Current Implementation Status
 
 - **Read**: Implemented. `sys_file` and `sys_file_reference` are readable via `ReadTable`, and `GetTableSchema` exposes both. FAL inline fields are automatically expanded with the embedded `file` block. Workspace modifications are overlaid into the response.
 - **Link (write `sys_file_reference`)**: Implemented. Both via the parent FAL shortcut and via direct `WriteTable` on `sys_file_reference` (metadata fields only). All writes go through the current workspace.
 - **Upload**: Implemented. `UploadFile` writes the physical file and the `sys_file` row directly to live (the exception this document describes). Metadata on `sys_file_metadata` is also written live, bypassing DataHandler.
+- **Folder management**: Implemented. `ListFolders` (read) and `CreateFolder` (idempotent create) operate live against the FAL storage, so the client can discover and prepare a destination before uploading.
 
 ## Related
 

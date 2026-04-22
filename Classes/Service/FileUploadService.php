@@ -161,7 +161,8 @@ class FileUploadService
         }
         if (!$storage->hasFolder($folderIdentifier)) {
             throw new \InvalidArgumentException(sprintf(
-                'Folder "%s" does not exist in storage %d.',
+                'Folder "%s" does not exist in storage %d. Use CreateFolder to create it, '
+                . 'or ListFolders to see which folders exist.',
                 $folderIdentifier,
                 $storage->getUid()
             ), 1735000009);

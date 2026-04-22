@@ -294,7 +294,10 @@ class FalUploadTest extends AbstractFunctionalTest
             'folder' => '/does_not_exist/',
         ]);
         $this->assertTrue($result->isError);
-        $this->assertStringContainsString('does not exist', $result->content[0]->text);
+        $text = $result->content[0]->text;
+        $this->assertStringContainsString('does not exist', $text);
+        $this->assertStringContainsString('CreateFolder', $text, 'error must hint at the CreateFolder tool');
+        $this->assertStringContainsString('ListFolders', $text, 'error must hint at the ListFolders tool');
     }
 
     private function fetchSysFile(int $uid): array

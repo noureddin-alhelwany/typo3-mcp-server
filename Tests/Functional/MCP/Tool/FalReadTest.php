@@ -199,6 +199,67 @@ class FalReadTest extends AbstractFunctionalTest
         $this->assertContains('sys_file_reference', $tableEnum, 'sys_file_reference must appear in the ReadTable enum');
     }
 
+    /**
+     * Regression: ReadTable table=sys_file uid=X failed with "Failed to count record"
+     * when the caller was inside a workspace. sys_file is not workspace-capable, so
+     * the OR-branch that references t3ver_oid hit an unknown column. The fix gates
+     * that branch on workspace capability.
+     */
+    public function testReadSysFileByUidInWorkspaceContext(): void
+    {
+        $this->createAndSwitchToWorkspace('FAL sys_file UID regression');
+
+        $result = $this->readTool->execute([
+            'table' => 'sys_file',
+            'uid' => 1,
+        ]);
+
+        $this->assertSuccessfulToolResult($result);
+        $data = $this->extractJsonFromResult($result);
+        $this->assertCount(1, $data['records']);
+        $this->assertSame(1, $data['records'][0]['uid']);
+    }
+
+    public function testReadSysFileWithNonExistentUidReturnsEmpty(): void
+    {
+        $this->createAndSwitchToWorkspace('FAL sys_file missing UID');
+
+        $result = $this->readTool->execute([
+            'table' => 'sys_file',
+            'uid' => 999999,
+        ]);
+
+        $this->assertSuccessfulToolResult($result);
+        $data = $this->extractJsonFromResult($result);
+        $this->assertSame([], $data['records']);
+        $this->assertSame(0, $data['total']);
+    }
+
+    /**
+     * sys_file_storage is also non-workspace-capable and on the allowed-root list;
+     * same bug, same fix. Storage 1 is auto-created by StorageRepository on first
+     * access, so a direct UID lookup must work in workspace context.
+     */
+    public function testReadSysFileStorageByUidInWorkspaceContext(): void
+    {
+        // Touch the StorageRepository to trigger the auto-create of storage 1.
+        \TYPO3\CMS\Core\Utility\GeneralUtility::makeInstance(
+            \TYPO3\CMS\Core\Resource\StorageRepository::class
+        )->getDefaultStorage();
+
+        $this->createAndSwitchToWorkspace('FAL sys_file_storage UID');
+
+        $result = $this->readTool->execute([
+            'table' => 'sys_file_storage',
+            'uid' => 1,
+        ]);
+
+        $this->assertSuccessfulToolResult($result);
+        $data = $this->extractJsonFromResult($result);
+        $this->assertCount(1, $data['records']);
+        $this->assertSame(1, $data['records'][0]['uid']);
+    }
+
     public function testReadInWorkspaceContextStillExposesLiveReferences(): void
     {
         $workspaceId = $this->createAndSwitchToWorkspace('FAL Test Workspace');

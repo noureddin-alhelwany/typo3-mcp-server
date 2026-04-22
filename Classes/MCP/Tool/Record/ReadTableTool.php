@@ -256,11 +256,15 @@ class ReadTableTool extends AbstractRecordTool
             // For workspace transparency, we need to handle both cases:
             // 1. The UID is a workspace UID (for new records)
             // 2. The UID is a live UID (for existing records with workspace versions)
-
+            //
+            // Non-workspace-capable tables (sys_file, sys_file_storage, …) have no
+            // t3ver_oid column — referencing it here produces an "Unknown column"
+            // error that surfaces to the client as "Failed to count record". Gate
+            // the OR-branch on workspace capability so those tables take the plain
+            // uid lookup even when the user is in a workspace.
             $currentWorkspace = $GLOBALS['BE_USER']->workspace ?? 0;
-            if ($currentWorkspace > 0) {
-                // In workspace context, check both live and workspace UIDs
-                // The WorkspaceDeletePlaceholderRestriction will handle delete placeholders automatically
+            if ($currentWorkspace > 0 && $this->isTableWorkspaceCapable($table)) {
+                // The WorkspaceDeletePlaceholderRestriction handles delete placeholders automatically.
                 $queryBuilder->andWhere(
                     $queryBuilder->expr()->or(
                         $queryBuilder->expr()->eq('uid', $queryBuilder->createNamedParameter($uid, ParameterType::INTEGER)),
@@ -268,7 +272,6 @@ class ReadTableTool extends AbstractRecordTool
                     )
                 );
             } else {
-                // In live workspace, just filter by UID
                 $queryBuilder->andWhere(
                     $queryBuilder->expr()->eq('uid', $queryBuilder->createNamedParameter($uid, ParameterType::INTEGER))
                 );
@@ -337,11 +340,10 @@ class ReadTableTool extends AbstractRecordTool
         }
 
         if ($uid !== null) {
-            // Apply the same UID filtering logic for count query
+            // Mirror the main query's workspace-capability gate — non-workspace-capable
+            // tables must not reference t3ver_oid in the count query either.
             $currentWorkspace = $GLOBALS['BE_USER']->workspace ?? 0;
-            if ($currentWorkspace > 0) {
-                // In workspace context, check both live and workspace UIDs
-                // The WorkspaceDeletePlaceholderRestriction will handle delete placeholders automatically
+            if ($currentWorkspace > 0 && $this->isTableWorkspaceCapable($table)) {
                 $countQueryBuilder->andWhere(
                     $countQueryBuilder->expr()->or(
                         $countQueryBuilder->expr()->eq('uid', $countQueryBuilder->createNamedParameter($uid, ParameterType::INTEGER)),
@@ -349,7 +351,6 @@ class ReadTableTool extends AbstractRecordTool
                     )
                 );
             } else {
-                // In live workspace, just filter by UID
                 $countQueryBuilder->andWhere(
                     $countQueryBuilder->expr()->eq('uid', $countQueryBuilder->createNamedParameter($uid, ParameterType::INTEGER))
                 );
