@@ -142,11 +142,55 @@ Non-existent UIDs fail fast with a clear error that names the offending table an
 
 When the write throws an exception that would otherwise be caught and reported as a generic `"Database operation failed"` / `"Invalid input provided"` / etc., `debug=true` surfaces the real exception class, message, file, line, and a trimmed stack trace inside the `_debug.exception` entry, and the user-facing error text becomes `<ExceptionClass>: <message>`. Without `debug=true` the generic message is preserved so DBAL query strings and paths don't leak unintentionally.
 
+## Upload Behavior
+
+The `UploadFile` tool writes the physical file and the `sys_file` row directly to live, intentionally bypassing workspace versioning because `sys_file` is not workspace-capable.
+
+Input shape:
+
+```json
+{
+  "filename": "hero.jpg",
+  "content": "<base64-encoded bytes>",
+  "folder": "/user_upload/",
+  "storage": 1,
+  "alternative": "Hero alt text",
+  "title": "Hero",
+  "description": ""
+}
+```
+
+Only `filename` and `content` are required. `storage` defaults to the configured default storage; `folder` defaults to that storage's default folder. Metadata fields (`alternative`, `title`, `description`) are optional and land on `sys_file_metadata` — also live, bypassing DataHandler.
+
+Defaults and safety rails:
+
+- **MIME whitelist**: `image/jpeg`, `image/png`, `image/gif`, `image/webp`, `image/svg+xml`, `application/pdf`. The MIME is detected from the actual bytes via `finfo`, not from the filename extension, so an `.exe` renamed to `.jpg` still gets rejected.
+- **Size limit**: 20 MB after base64 decoding. Configurable per-call through the underlying service, but the tool exposes the hard default.
+- **Duplicate filenames**: resolved with `DuplicationBehavior::RENAME` — a second upload of `hero.jpg` lands as `hero_01.jpg`.
+- **Permissions**: the tool goes through `StorageRepository` + `ResourceStorage::addFile` + `Folder::addFile`. Filemount and storage write permission enforcement are left to the TYPO3 core checks; the surfaced error is whatever the core raises (e.g. `InsufficientFolderWritePermissionsException`).
+
+Response shape:
+
+```json
+{
+  "uid": 42,
+  "identifier": "/user_upload/hero.jpg",
+  "name": "hero.jpg",
+  "mime_type": "image/jpeg",
+  "size": 12345,
+  "storage": 1
+}
+```
+
+The returned `uid` is the live `sys_file.uid` and can be fed straight into the FAL linking shortcut on the next `WriteTable` call.
+
+No `sys_file_reference` row is created by `UploadFile` — linking is a separate step and stays in the workspace.
+
 ## Current Implementation Status
 
 - **Read**: Implemented. `sys_file` and `sys_file_reference` are readable via `ReadTable`, and `GetTableSchema` exposes both. FAL inline fields are automatically expanded with the embedded `file` block. Workspace modifications are overlaid into the response.
 - **Link (write `sys_file_reference`)**: Implemented. Both via the parent FAL shortcut and via direct `WriteTable` on `sys_file_reference` (metadata fields only). All writes go through the current workspace.
-- **Upload**: Planned. Uploads will write `sys_file` and the physical file directly to live (the exception this document describes).
+- **Upload**: Implemented. `UploadFile` writes the physical file and the `sys_file` row directly to live (the exception this document describes). Metadata on `sys_file_metadata` is also written live, bypassing DataHandler.
 
 ## Related
 

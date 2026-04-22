@@ -124,6 +124,9 @@ The MCP Server provides these tools for interacting with TYPO3:
 ### Content Modification
 - **WriteTable** - Create, update, or delete records (safely in workspace)
 
+### File Management
+- **UploadFile** - Upload a binary file into a FAL storage and create the matching `sys_file` row (written to live per the FAL exception; linking stays in workspace via `WriteTable`)
+
 > Each tool provides detailed schema information when called. See the Real-World Scenarios below for practical examples.
 
 ## Real-World Scenarios
@@ -255,7 +258,7 @@ Relations are transparently resolved and can be set using simple syntax:
 - **Select relations**: Use comma-separated IDs or arrays
 - **Inline relations**: Provide as nested objects
 - **MM relations**: Handled automatically
-- **File references**: Read + link existing files via the FAL linking shortcut (`image: [{file: 42, alternative: "…"}]`). Uploads are still pending — see [FAL.md](Documentation/Architecture/FAL.md)
+- **File references**: Read + link + upload via the FAL linking shortcut (`image: [{file: 42, alternative: "…"}]`) plus the `UploadFile` tool — see [FAL.md](Documentation/Architecture/FAL.md)
 - **Bidirectional**: Updates both sides as needed
 
 ### Language Support
@@ -315,12 +318,6 @@ The MCP Server respects all TYPO3 permissions:
 ## What's Not Yet Implemented
 
 While the MCP Server is powerful, some features are still in development:
-
-### Image/File Handling
-- Linking existing files to records works via the FAL linking shortcut (`image: [{file: 42, ...}]`); references go through the workspace.
-- Cannot upload new files yet — the upload tool is planned.
-- Workaround: pre-upload files through the TYPO3 backend, then reference them by `sys_file.uid`.
-- See [FAL.md](Documentation/Architecture/FAL.md) for the workspace-safety boundary.
 
 ### Direct Workspace Management
 - Cannot create/delete workspaces
