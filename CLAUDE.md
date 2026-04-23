@@ -8,3 +8,5 @@
 - Always check if there is some typo3 core api that can be used for TCA related data actions.
 - If the TYPO3 instance has no language support, then hide all aspects of translation like parameters or even database fields. Check the LanguageService.php to check support.
 - Language overlays use TYPO3's PageRepository API while workspace overlays use custom implementation for transparency (see Documentation/Architecture/LanguageOverlays.md)
+- WriteTable invariant: `isError` reflects only the committed DB state. Post-processing glitches (read-backs, live-UID resolution) surface as `_warnings[]` on an otherwise successful response, never flip the call to an error. See `Documentation/Architecture/WriteTableSemantics.md`.
+- MCP tools run outside an HTTP request. WriteTable injects a synthetic backend `ServerRequest` around DataHandler calls so hooks (b13/container, content_defender, …) and DataHandler's own parent-page lookups have what they need. Don't duplicate this elsewhere — reuse `withSyntheticRequest()` in `WriteTableTool` if a new tool needs the same guarantee.

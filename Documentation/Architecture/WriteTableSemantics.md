@@ -1,0 +1,69 @@
+# WriteTable — Semantics, Defaults, Guarantees
+
+Notes about the non-obvious behaviour of the `WriteTable` tool. Targeted at contributors and at operators who want to understand why a given response looks the way it does.
+
+## Error-Status Invariant
+
+`isError` in the response reflects **only** whether the DB write was committed. Nothing else can flip it.
+
+- DataHandler `errorLog` non-empty → `isError: true`, no DB change.
+- DataHandler `errorLog` empty AND the record was written → `isError: false`, DB has the effect.
+
+Post-processing failures — read-backs that translate a workspace UID to a live UID, parent-pid lookups for follow-up children, the final response assembly — cannot turn a committed write into an error. They surface as warnings:
+
+```json
+{
+  "action": "create",
+  "table": "tt_content",
+  "uid": 42,
+  "_warnings": [
+    "Post-processing step 'resolve-live-uid-for-response' failed (ConnectionLost): ..."
+  ]
+}
+```
+
+`_warnings` is omitted entirely on a clean response. This is the contract that [WriteTableErrorReportingTest](../../Tests/Functional/MCP/Tool/WriteTableErrorReportingTest.php) pins.
+
+DBAL-level exceptions that do surface as errors now carry their concrete class + message (`"Database error (DriverException): ..."`) instead of the former generic `"Database operation failed"`. The `debug=true` option still adds the full `_debug` block on top; it's not a replacement for a useful default message.
+
+## Synthetic Backend Request
+
+MCP tools run outside HTTP, so `$GLOBALS['TYPO3_REQUEST']` is unset by default. DataHandler's internal parent-page resolution and any DataHandler hook that calls `FormDataCompiler` (b13/container, content_defender, …) both expect a request with `applicationType = REQUESTTYPE_BE` and a `site` attribute.
+
+`WriteTableTool` injects a synthetic request around the tool body and restores the previous global unconditionally via `finally`. The site is resolved best-effort:
+
+1. `SiteFinder::getSiteByPageId($pid)` — rootline traversal, works even for workspace-new pages that have no live sibling on the same level.
+2. Fall back to the first configured site.
+3. If no site exists at all, the request is attached without a `site` attribute; hooks that need one will fail clearly.
+
+The previous global is restored via `finally` so subsequent MCP calls in the same long-lived process don't inherit our request.
+
+## `position` — Defaults and Semantics
+
+- `position` defaults to `"bottom"` (last in the same `(pid, colPos)`).
+- Implementation uses TYPO3's native `pid = -lastRecordUid` convention. We look up the last record in the target `(pid, colPos)` by `sorting DESC`, then hand DataHandler a negative pid; DataHandler's own `getSortNumber()` places the new row directly after.
+- For tables with a `colPos` column (chiefly `tt_content`) the last-record lookup is scoped to `colPos`. Without the scope, a new row for column A would otherwise anchor to the globally-last record on the page even if that record lived in column B.
+- Empty `(pid, colPos)` combinations fall back to DataHandler's first-record logic (positive pid, no sort override).
+- `position = "after:<UID>"` / `"before:<UID>"` continues to use an explicit move cmdmap after the create.
+
+## `colPos` — Default 0
+
+When omitted on `tt_content`, `colPos` defaults to `0` ("Normal" column). This is just DataHandler's normal behaviour; nothing MCP-specific.
+
+## FAL Linking Shortcut — `crop` Default
+
+Writing a `sys_file_reference` via the FAL shortcut (e.g. `image: [{file: N, alternative: "..."}]`) fills `crop` with `'{}'` when the client did not provide one.
+
+The read-shape documented in [FAL.md](FAL.md) also shows `"crop": {}`. `CropVariantCollection::create('{}')` falls back to the viewport defaults from TCA, which renders the full image at every viewport. This avoids the "must open+save in the BE before the FE renders" class of bugs without requiring MCP to synthesise the concrete cropVariants JSON from TCA on every write.
+
+Explicit client-provided crop still passes through verbatim.
+
+## `debug` Parameter
+
+`debug: true` attaches a `_debug` block with DataHandler snapshots per phase (`datamap`, `cmdmap`, `errorLog`, `substNEWwithIDs`, `copyMappingArray`) and, on exceptions, the concrete exception class/message/file/line. The block can be large — do not leave it on in production calls. Warnings live in the standard `_warnings` key and are independent of debug mode.
+
+## See Also
+
+- [FAL.md](FAL.md) — FAL-specific write semantics (linking shortcut, upload, folder management).
+- [Preview.md](Preview.md) — Preview-link workflow that closes the Edit → Review → Publish loop.
+- [WorkspaceTransparency.md](WorkspaceTransparency.md) — how workspace UIDs are hidden from the client.

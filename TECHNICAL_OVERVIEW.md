@@ -263,8 +263,9 @@ Relations are transparently resolved and can be set using simple syntax:
 - **Select relations**: Use comma-separated IDs or arrays
 - **Inline relations**: Provide as nested objects
 - **MM relations**: Handled automatically
-- **File references**: Read + link + upload via the FAL linking shortcut (`image: [{file: 42, alternative: "…"}]`) plus the `UploadFile` tool — see [FAL.md](Documentation/Architecture/FAL.md)
+- **File references**: Read + link + upload via the FAL linking shortcut (`image: [{file: 42, alternative: "…"}]`) plus the `UploadFile` tool — see [FAL.md](Documentation/Architecture/FAL.md). `crop` defaults to `'{}'` so newly linked files render in the frontend without needing a BE round-trip.
 - **Bidirectional**: Updates both sides as needed
+- **Sorting**: `position` defaults to "bottom" in the target column (`colPos`). Implementation uses DataHandler's native negative-pid convention so consecutive creates land in creation order — see [WriteTableSemantics.md](Documentation/Architecture/WriteTableSemantics.md).
 
 ### Language Support
 
