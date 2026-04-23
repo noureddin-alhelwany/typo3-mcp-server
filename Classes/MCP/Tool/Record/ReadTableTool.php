@@ -25,6 +25,16 @@ class ReadTableTool extends AbstractRecordTool
 {
     protected LanguageService $languageService;
 
+    /**
+     * Per-call flag, reset at the top of doExecute(). When true, processRecord()
+     * keeps the workspace-metadata columns (t3ver_*, l10n_state, l10n_source,
+     * l10n_diffsource, l10n_parent/l18n_parent) that are normally stripped. It's
+     * a diagnostic escape hatch — the client still sees the live UID at the top
+     * level (workspace UID swap still runs), only the extra implementation
+     * columns are passed through.
+     */
+    protected bool $includeWorkspaceFields = false;
+
     public function __construct()
     {
         parent::__construct();
@@ -78,6 +88,10 @@ class ReadTableTool extends AbstractRecordTool
                 'items' => ['type' => 'string'],
                 'description' => 'Optional list of field names to include in the result. Only uid is always included. When omitted, all type-relevant fields are returned. Use GetTableSchema to discover available fields.',
             ],
+            'includeWorkspaceFields' => [
+                'type' => 'boolean',
+                'description' => 'Diagnostic flag: when true, the response keeps the workspace-metadata columns (t3ver_state, t3ver_oid, t3ver_wsid, t3ver_stage, l10n_state, l10n_source, l10n_diffsource, l10n_parent, l18n_parent) that are normally stripped for workspace transparency. Use this when investigating why a workspace-new record behaves unexpectedly in the frontend. Default: false.',
+            ],
         ];
 
         // Only add language parameters if multiple languages are configured
@@ -129,6 +143,7 @@ class ReadTableTool extends AbstractRecordTool
         $offset = isset($params['offset']) ? (int)$params['offset'] : 0;
         $language = $params['language'] ?? null;
         $includeTranslationSource = $params['includeTranslationSource'] ?? false;
+        $this->includeWorkspaceFields = !empty($params['includeWorkspaceFields']);
         $requestedFields = $this->normalizeFieldNames($table, $params['fields'] ?? []);
 
         // Ensure translation parent field is included when translation source is requested
@@ -437,10 +452,23 @@ class ReadTableTool extends AbstractRecordTool
         // row and sets `_ORIG_uid` etc. as implementation markers; `t3ver_*` columns
         // carry the same workspace-internal state. CLAUDE.md: "workspaces must be
         // invisible to the MCP client, for example, by only exposing the live id".
-        foreach (['_ORIG_uid', '_ORIG_pid', '_ORIG_t3ver_oid', 't3ver_oid', 't3ver_wsid',
-                  't3ver_state', 't3ver_stage', 't3ver_count', 't3ver_move_id',
-                  't3ver_tstamp'] as $hiddenField) {
+        //
+        // The `_ORIG_*` markers always get stripped — they are core-internal
+        // shims with no meaning outside the overlay machinery. The other columns
+        // can be surfaced by setting the `includeWorkspaceFields` flag, which is
+        // the diagnostic escape hatch for investigating render-gap style bugs.
+        $alwaysStrip = ['_ORIG_uid', '_ORIG_pid', '_ORIG_t3ver_oid'];
+        $conditionalStrip = [
+            't3ver_oid', 't3ver_wsid', 't3ver_state', 't3ver_stage',
+            't3ver_count', 't3ver_move_id', 't3ver_tstamp',
+        ];
+        foreach ($alwaysStrip as $hiddenField) {
             unset($record[$hiddenField]);
+        }
+        if (!$this->includeWorkspaceFields) {
+            foreach ($conditionalStrip as $hiddenField) {
+                unset($record[$hiddenField]);
+            }
         }
 
         // Ensure uid is always in the requested fields when a field list is specified
@@ -488,9 +516,18 @@ class ReadTableTool extends AbstractRecordTool
                 }
             }
 
-            // Skip fields not relevant to this record type (only if we have a valid type configuration)
+            // Skip fields not relevant to this record type (only if we have a valid type configuration).
+            // The diagnostic flag bypasses the showitem filter for workspace/localization
+            // metadata — those columns aren't normally declared in showitem since they're
+            // implementation details, but investigators may need them.
             if ($hasValidTypeConfig && !in_array($field, $typeSpecificFields)) {
-                continue;
+                $isDiagnosticField = $this->includeWorkspaceFields && (
+                    str_starts_with($field, 't3ver_')
+                    || in_array($field, ['l10n_state', 'l10n_source', 'l10n_diffsource', 'l10n_parent', 'l18n_parent'], true)
+                );
+                if (!$isDiagnosticField) {
+                    continue;
+                }
             }
 
             // Skip fields not in the requested field list
