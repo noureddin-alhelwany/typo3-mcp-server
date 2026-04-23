@@ -35,6 +35,17 @@ class WriteTableTool extends AbstractRecordTool
      */
     protected array $debugLog = [];
 
+    /**
+     * Per-call accumulator for post-processing warnings, cleared at the start of each
+     * doExecute(). The invariant: isError in the response reflects ONLY whether the
+     * DataHandler-committed DB state was produced; failures in read-backs, live-UID
+     * resolution, or response-building land here as warnings on an otherwise
+     * successful response.
+     *
+     * @var list<string>
+     */
+    protected array $warnings = [];
+
     public function __construct()
     {
         parent::__construct();
@@ -102,6 +113,57 @@ class WriteTableTool extends AbstractRecordTool
             );
         }
         return $result;
+    }
+
+    /**
+     * Run a post-processing step that must not be allowed to fail the whole
+     * operation. If the callable throws, the exception is recorded as a warning
+     * on the eventual success response and null is returned so the caller can
+     * fall back to a safe default.
+     *
+     * Rationale (PR-6 Bug 5): once DataHandler has committed a write, subsequent
+     * read-backs (live-uid resolution, post-create cmdmap moves, metadata
+     * re-reads) may still throw — e.g. because a DBAL driver-level issue
+     * surfaces during a follow-up query. Those failures must not masquerade as
+     * "the write failed" to the client. They are observability concerns on an
+     * otherwise successful operation and belong in the warnings stream.
+     */
+    protected function postProcess(callable $fn, string $step): mixed
+    {
+        try {
+            return $fn();
+        } catch (\Throwable $e) {
+            $this->warnings[] = sprintf(
+                "Post-processing step '%s' failed (%s): %s",
+                $step,
+                (new \ReflectionClass($e))->getShortName(),
+                $e->getMessage()
+            );
+            if ($this->debugEnabled) {
+                $this->debugLog['postprocess:' . $step] = [
+                    'class' => get_class($e),
+                    'message' => $e->getMessage(),
+                    'file' => $e->getFile(),
+                    'line' => $e->getLine(),
+                ];
+            }
+            return null;
+        }
+    }
+
+    /**
+     * Build a success response with the accumulated warnings folded in (if any).
+     * Callers use this instead of `attachDebug(createJsonResult(...))` at the end
+     * of a successful write so the warnings contract is consistent.
+     *
+     * @param array<string, mixed> $payload
+     */
+    protected function createSuccessResponse(array $payload): CallToolResult
+    {
+        if (!empty($this->warnings)) {
+            $payload['_warnings'] = $this->warnings;
+        }
+        return $this->attachDebug($this->createJsonResult($payload));
     }
 
     /**
@@ -262,6 +324,7 @@ class WriteTableTool extends AbstractRecordTool
     {
         $this->debugEnabled = !empty($params['debug']);
         $this->debugLog = [];
+        $this->warnings = [];
 
         try {
             return $this->doExecuteInner($params);
@@ -532,8 +595,15 @@ class WriteTableTool extends AbstractRecordTool
             return $this->attachDebug($this->createErrorResult('Error creating record: No UID returned'));
         }
         
-        // Get the live UID for inline relations if we're in a workspace
-        $liveParentUid = $this->getLiveUid($table, $parentUid);
+        // Get the live UID for inline relations if we're in a workspace.
+        // Any failure here is a post-processing warning — the parent write
+        // already succeeded, we just may not be able to resolve the live UID
+        // at this instant. Fall back to the workspace UID so children can
+        // still attach.
+        $liveParentUid = $this->postProcess(
+            fn() => $this->getLiveUid($table, $parentUid),
+            'resolve-live-parent-uid'
+        ) ?? $parentUid;
         
         // Now process inline relations with the resolved parent UID
         if (!empty($inlineRelations)) {
@@ -624,26 +694,25 @@ class WriteTableTool extends AbstractRecordTool
 
             // Check for errors in the move operation
             if (!empty($moveDataHandler->errorLog)) {
-                // The record was created but positioning failed
-                $liveUid = $this->getLiveUid($table, $parentUid);
-                return $this->attachDebug($this->createJsonResult([
-                    'action' => 'create',
-                    'table' => $table,
-                    'uid' => $liveUid,
-                    'warning' => 'Record created but positioning failed: ' . implode(', ', $moveDataHandler->errorLog)
-                ]));
+                // The record was created but positioning failed — record as a warning
+                // alongside the success, do NOT mark the write as failed.
+                $this->warnings[] = 'Record created but positioning failed: ' . implode(', ', $moveDataHandler->errorLog);
             }
         }
 
-        // Get the live UID for workspace transparency
-        $liveUid = $this->getLiveUid($table, $parentUid);
+        // Get the live UID for workspace transparency. Same post-processing rule
+        // as above: we already have a committed parent write, so failure here
+        // becomes a warning with the workspace UID as fallback.
+        $liveUid = $this->postProcess(
+            fn() => $this->getLiveUid($table, $parentUid),
+            'resolve-live-uid-for-response'
+        ) ?? $parentUid;
 
-        // Return the result with live UID
-        return $this->attachDebug($this->createJsonResult([
+        return $this->createSuccessResponse([
             'action' => 'create',
             'table' => $table,
             'uid' => $liveUid,
-        ]));
+        ]);
     }
     
     /**
@@ -705,8 +774,14 @@ class WriteTableTool extends AbstractRecordTool
 
         // Now process inline relations with the resolved parent UID
         if (!empty($inlineRelations)) {
-            // Get record's pid for creating new inline records
-            $record = BackendUtility::getRecord($table, $workspaceUid, 'pid');
+            // Get record's pid for creating new inline records. This read-back
+            // CAN fail (DBAL glitch, workspace inconsistency) — treat as
+            // post-processing warning with pid=0 fallback, but the parent write
+            // itself already succeeded above.
+            $record = $this->postProcess(
+                fn() => BackendUtility::getRecord($table, $workspaceUid, 'pid'),
+                'read-back-pid-for-inline'
+            );
             $pid = $record['pid'] ?? 0;
 
             $childDataMap = [];
@@ -764,11 +839,11 @@ class WriteTableTool extends AbstractRecordTool
         }
 
         // Return the result with the original live UID (workspace transparency).
-        return $this->attachDebug($this->createJsonResult([
+        return $this->createSuccessResponse([
             'action' => 'update',
             'table' => $table,
             'uid' => $uid,
-        ]));
+        ]);
     }
     
     /**
@@ -792,11 +867,11 @@ class WriteTableTool extends AbstractRecordTool
             return $this->attachDebug($this->createErrorResult($dhError));
         }
 
-        return $this->attachDebug($this->createJsonResult([
+        return $this->createSuccessResponse([
             'action' => 'delete',
             'table' => $table,
             'uid' => $uid,
-        ]));
+        ]);
     }
     
     /**

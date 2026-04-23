@@ -113,7 +113,11 @@ trait ExceptionHandlerTrait
             $e instanceof \InvalidArgumentException => 'Invalid input provided' . ($operation ? ' for ' . $operation : ''),
             $e instanceof \RuntimeException => 'Operation failed' . ($operation ? ': ' . $operation : ''),
             $e instanceof \DomainException => 'Invalid operation requested',
-            $e instanceof \Doctrine\DBAL\Exception => 'Database operation failed',
+            $e instanceof \Doctrine\DBAL\Exception => sprintf(
+                'Database error (%s): %s',
+                (new \ReflectionClass($e))->getShortName(),
+                $e->getMessage()
+            ),
             default => 'An unexpected error occurred' . ($operation ? ' during ' . $operation : '')
         };
     }
