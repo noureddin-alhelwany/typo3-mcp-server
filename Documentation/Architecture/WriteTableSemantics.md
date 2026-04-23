@@ -58,6 +58,44 @@ The read-shape documented in [FAL.md](FAL.md) also shows `"crop": {}`. `CropVari
 
 Explicit client-provided crop still passes through verbatim.
 
+## PageTSconfig TCAdefaults on Create
+
+The BE form applies `TCAdefaults.<table>.<field>` (and the type-specific
+variant `TCAdefaults.<table>.<field>.types.<recordType>`) from PageTSconfig
+when an editor opens the "new record" form; the submitted form then carries
+those values into DataHandler. Programmatic creates via WriteTable skip the
+form layer, so without intervention they produce rows where those defaults
+are missing.
+
+WriteTable runs an equivalent pass before handing data to DataHandler:
+
+- Reads PageTSconfig for the target pid via `BackendUtility::getPagesTSconfig`.
+- Applies both the field-level and type-specific variants, with type-specific
+  winning when the record's type matches.
+- Caller-provided values always win (`array_key_exists` check, so even an
+  explicit `null` or `""` is preserved).
+
+The practical effect: themes that condition Fluid rendering on a field like
+`color` render correctly from the first MCP create, without requiring an
+editor to "open and save" the record in the backend. See
+[PR-7 plan](../../.claude/plans/pr-7-workspace-preview-render-gap.md) for the
+original investigation.
+
+## Workspace-Preview Render Invariant
+
+The pipeline from MCP-create to frontend-preview-render must work without a
+BE round-trip. `WorkspacePreviewRenderTest` is the end-to-end guard that
+pins this: create page → create tt_content → render preview → HTML contains
+the CE's header. Any write-path change that risks breaking this invariant
+should run the test.
+
+When investigating related regressions, `ReadTable` accepts a diagnostic
+`includeWorkspaceFields: true` parameter that surfaces the workspace and
+localization metadata columns (`t3ver_*`, `l10n_state`, `l10n_source`,
+`l10n_diffsource`, `l10n_parent`, `l18n_parent`) that are normally stripped
+for transparency. Use it to verify DataHandler produced the expected
+versioning shape without resorting to an out-of-band SQL session.
+
 ## `debug` Parameter
 
 `debug: true` attaches a `_debug` block with DataHandler snapshots per phase (`datamap`, `cmdmap`, `errorLog`, `substNEWwithIDs`, `copyMappingArray`) and, on exceptions, the concrete exception class/message/file/line. The block can be large — do not leave it on in production calls. Warnings live in the standard `_warnings` key and are independent of debug mode.
