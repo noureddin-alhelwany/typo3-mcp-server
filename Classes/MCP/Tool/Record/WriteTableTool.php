@@ -10,7 +10,11 @@ use Hn\McpServer\Exception\ValidationException;
 use Hn\McpServer\Service\LanguageService;
 use Mcp\Types\CallToolResult;
 use TYPO3\CMS\Backend\Utility\BackendUtility;
+use TYPO3\CMS\Core\Core\SystemEnvironmentBuilder;
 use TYPO3\CMS\Core\DataHandling\DataHandler;
+use TYPO3\CMS\Core\Http\NormalizedParams;
+use TYPO3\CMS\Core\Http\ServerRequest;
+use TYPO3\CMS\Core\Site\SiteFinder;
 use TYPO3\CMS\Core\Utility\GeneralUtility;
 use TYPO3\CMS\Core\Database\ConnectionPool;
 use TYPO3\CMS\Core\Database\Query\Restriction\DeletedRestriction;
@@ -164,6 +168,99 @@ class WriteTableTool extends AbstractRecordTool
             $payload['_warnings'] = $this->warnings;
         }
         return $this->attachDebug($this->createJsonResult($payload));
+    }
+
+    /**
+     * Inject a synthetic backend ServerRequest into $GLOBALS['TYPO3_REQUEST'] for
+     * the duration of the given callable and restore the previous value after.
+     *
+     * Why (PR-6 Bug 1 + Bug 4):
+     *
+     * - MCP tools run outside an HTTP request (stdio/CLI), so $GLOBALS['TYPO3_REQUEST']
+     *   is unset. DataHandler's own parent-page lookups and FormDataCompiler-based
+     *   extension hooks (content_defender, b13/container, ...) both rely on a
+     *   present request with an `applicationType` of REQUESTTYPE_BE and a `site`
+     *   attribute.
+     *
+     * - Without the request, DataHandler can produce garbled queries that DBAL
+     *   surfaces as "MySQL server has gone away", and FormDataCompiler raises
+     *   "The current ServerRequestInterface must be provided". Both are the same
+     *   root cause: no request in scope.
+     *
+     * - The site is best-effort: we try SiteFinder::getSiteByPageId($pidHint)
+     *   first because that's usually the right match (and it traverses the
+     *   rootline, so it also works for workspace-new pages whose live parent
+     *   does have a site). If nothing resolves, we fall back to the first
+     *   configured site. Having A site is what hooks need; having exactly the
+     *   right one is a refinement.
+     *
+     * Save/restore is unconditional (even on exception) so subsequent MCP
+     * tool calls in the same process don't inherit our synthetic request.
+     *
+     * @template T
+     * @param int|null $pidHint Page UID to derive the site from when possible.
+     * @param callable(): T $fn
+     * @return T
+     */
+    protected function withSyntheticRequest(?int $pidHint, callable $fn): mixed
+    {
+        $previous = $GLOBALS['TYPO3_REQUEST'] ?? null;
+
+        $serverParams = [
+            'HTTP_HOST' => 'localhost',
+            'SERVER_NAME' => 'localhost',
+            'REQUEST_URI' => '/',
+            'SCRIPT_NAME' => '/index.php',
+            'REQUEST_METHOD' => 'GET',
+        ];
+
+        $request = (new ServerRequest('http://localhost/', 'GET', 'php://input', [], $serverParams))
+            ->withAttribute('applicationType', SystemEnvironmentBuilder::REQUESTTYPE_BE)
+            ->withAttribute(
+                'normalizedParams',
+                GeneralUtility::makeInstance(NormalizedParams::class, $serverParams, [], '', '')
+            );
+
+        $site = $this->resolveSiteForRequest($pidHint);
+        if ($site !== null) {
+            $request = $request->withAttribute('site', $site);
+        }
+
+        $GLOBALS['TYPO3_REQUEST'] = $request;
+
+        try {
+            return $fn();
+        } finally {
+            if ($previous === null) {
+                unset($GLOBALS['TYPO3_REQUEST']);
+            } else {
+                $GLOBALS['TYPO3_REQUEST'] = $previous;
+            }
+        }
+    }
+
+    /**
+     * Try to locate a site object for the synthetic request. Returns null if
+     * nothing is configured — the request then goes out without a `site`
+     * attribute, which is acceptable for plain-DataHandler calls (hooks that
+     * need site will fail loudly and clearly, which is better than silent
+     * mis-routing).
+     */
+    private function resolveSiteForRequest(?int $pidHint): ?\TYPO3\CMS\Core\Site\Entity\SiteInterface
+    {
+        $siteFinder = GeneralUtility::makeInstance(SiteFinder::class);
+        if ($pidHint !== null && $pidHint > 0) {
+            try {
+                return $siteFinder->getSiteByPageId($pidHint);
+            } catch (\Throwable) {
+                // Fall through to first-site fallback.
+            }
+        }
+        $all = $siteFinder->getAllSites();
+        if ($all === []) {
+            return null;
+        }
+        return reset($all);
     }
 
     /**
@@ -326,8 +423,16 @@ class WriteTableTool extends AbstractRecordTool
         $this->debugLog = [];
         $this->warnings = [];
 
+        // Derive a site-hint from whichever id the caller provided. For create
+        // calls it's the target pid; for update/delete we'd have to resolve
+        // uid -> pid first, which is exactly the kind of lookup that the
+        // injected request is meant to stabilise — so we pass the uid as the
+        // hint too and let SiteFinder fall back if it can't resolve.
+        $pidHint = isset($params['pid']) ? (int)$params['pid']
+            : (isset($params['uid']) ? (int)$params['uid'] : null);
+
         try {
-            return $this->doExecuteInner($params);
+            return $this->withSyntheticRequest($pidHint, fn() => $this->doExecuteInner($params));
         } catch (\Throwable $e) {
             // Capture the exception in the debug accumulator so `debug=true` calls see
             // the real cause. Without this hook the exception propagates to
