@@ -647,31 +647,32 @@ class WriteTableTool extends AbstractRecordTool
         // Prepare the data array
         $newRecordData = $data;
         $newRecordData['pid'] = $pid;
-        
-        // Handle sorting for bottom position
-        // Only set sorting if the table has a sorting field configured and not explicitly provided
+
+        // PR-6 Bug 2: position='bottom' via DataHandler's native "insert after"
+        // convention (negative pid). Setting an explicit sorting value is
+        // unreliable — DataHandler's own getSortNumber() may override it when
+        // it sees a positive pid, which produced the observed "newest record
+        // on top" inversion. The correct TYPO3 idiom is pid=-<lastUid> so
+        // DataHandler's sort-number logic inserts directly after that record.
+        //
+        // Per-column scoping: for tables with a colPos field (tt_content), the
+        // "last record" must be scoped to the same (pid, colPos). Without the
+        // scope we'd anchor the new record to whatever column happens to hold
+        // the globally-last sorting value, landing the new row in the wrong
+        // column.
         $sortingField = $this->tableAccessService->getSortingFieldName($table);
         if ($position === 'bottom' && $sortingField !== null && !isset($data[$sortingField])) {
-            // Get the maximum sorting value and add some space
-            $queryBuilder = GeneralUtility::makeInstance(ConnectionPool::class)
-                ->getQueryBuilderForTable($table);
+            $targetColPos = $this->columnHasField($table, 'colPos')
+                ? (int)($data['colPos'] ?? 0)
+                : null;
 
-            $maxSorting = $queryBuilder
-                ->select($sortingField)
-                ->from($table)
-                ->where(
-                    $queryBuilder->expr()->eq('pid', $queryBuilder->createNamedParameter($pid, ParameterType::INTEGER))
-                )
-                ->orderBy($sortingField, 'DESC')
-                ->setMaxResults(1)
-                ->executeQuery()
-                ->fetchOne();
-
-            if ($maxSorting !== false) {
-                $newRecordData[$sortingField] = (int)$maxSorting + 128; // Add some space for future insertions
+            $lastUid = $this->findLastRecordUidForBottomInsert($table, $pid, $sortingField, $targetColPos);
+            if ($lastUid !== null) {
+                $newRecordData['pid'] = -$lastUid;
+                unset($newRecordData[$sortingField]);
             }
         }
-        
+
         // Create a unique ID for this new record
         $newId = 'NEW' . uniqid();
         
@@ -1436,6 +1437,47 @@ class WriteTableTool extends AbstractRecordTool
      * FAL linking shortcut: translate client-friendly `file` → DB field `uid_local`
      * for sys_file_reference records.
      */
+    /**
+     * @return bool True if the table's TCA defines the given column.
+     */
+    private function columnHasField(string $table, string $fieldName): bool
+    {
+        return isset($GLOBALS['TCA'][$table]['columns'][$fieldName]);
+    }
+
+    /**
+     * Find the UID of the last record (by sorting DESC) that a new "bottom"
+     * insert should land after. Scoped to (pid, colPos) when the table has a
+     * colPos column so tt_content rows don't get anchored to the wrong column.
+     *
+     * Returns null if the column is empty — the caller should leave pid
+     * positive and let DataHandler use its first-record logic.
+     */
+    private function findLastRecordUidForBottomInsert(
+        string $table,
+        int $pid,
+        string $sortingField,
+        ?int $colPos
+    ): ?int {
+        $qb = GeneralUtility::makeInstance(ConnectionPool::class)
+            ->getQueryBuilderForTable($table);
+
+        $qb->select('uid')
+            ->from($table)
+            ->where($qb->expr()->eq('pid', $qb->createNamedParameter($pid, ParameterType::INTEGER)));
+
+        if ($colPos !== null) {
+            $qb->andWhere($qb->expr()->eq('colPos', $qb->createNamedParameter($colPos, ParameterType::INTEGER)));
+        }
+
+        $uid = $qb->orderBy($sortingField, 'DESC')
+            ->setMaxResults(1)
+            ->executeQuery()
+            ->fetchOne();
+
+        return $uid === false ? null : (int)$uid;
+    }
+
     protected function applyFalShortcut(array $recordData, string $foreignTable): array
     {
         if ($foreignTable !== 'sys_file_reference') {
