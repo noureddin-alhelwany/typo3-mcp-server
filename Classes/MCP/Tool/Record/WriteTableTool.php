@@ -643,7 +643,15 @@ class WriteTableTool extends AbstractRecordTool
         
         // Convert data for storage
         $data = $this->convertDataForStorage($table, $data);
-        
+
+        // PR-7: apply PageTSconfig `TCAdefaults.<table>.<field>` defaults for
+        // fields the caller did not supply. This mirrors the form-data-provider
+        // pass the BE form runs when an editor opens the "new record" form; our
+        // programmatic path bypasses the form layer, so those defaults would
+        // otherwise only appear after a manual BE save (which is the exact
+        // symptom PR-7 addresses for theme-conditional rendering).
+        $data = $this->applyPageTsConfigDefaults($table, $pid, $data);
+
         // Prepare the data array
         $newRecordData = $data;
         $newRecordData['pid'] = $pid;
@@ -1443,6 +1451,106 @@ class WriteTableTool extends AbstractRecordTool
     private function columnHasField(string $table, string $fieldName): bool
     {
         return isset($GLOBALS['TCA'][$table]['columns'][$fieldName]);
+    }
+
+    /**
+     * Apply PageTSconfig `TCAdefaults.<table>.<field>` values for fields the
+     * caller has not explicitly supplied. Includes the type-specific variant
+     * `TCAdefaults.<table>.<field>.types.<typeName>` which lets editors
+     * configure per-CType defaults (e.g. `tt_content.color.types.textmedia`).
+     *
+     * This mirrors `DatabaseRowInitializeNew::setDefaultsFromPageTsConfig`
+     * from the TYPO3 backend form-data-provider chain, which runs when an
+     * editor opens the "new record" form. Programmatic inserts via MCP
+     * bypass the form layer entirely, so without this pass fields that a
+     * theme's Fluid template conditions on (e.g. ryze's `color`) would
+     * render empty until the editor manually opens and saves the record.
+     *
+     * @param array<string, mixed> $data
+     * @return array<string, mixed>
+     */
+    protected function applyPageTsConfigDefaults(string $table, int $pid, array $data): array
+    {
+        $rootLine = BackendUtility::BEgetRootLine($pid);
+        $pageTsConfig = BackendUtility::getPagesTSconfig($pid, $rootLine);
+        $tableWithDot = $table . '.';
+        $tcaDefaults = $pageTsConfig['TCAdefaults.'][$tableWithDot] ?? null;
+        if (!is_array($tcaDefaults)) {
+            return $data;
+        }
+
+        $recordType = $this->resolveRecordTypeForDefaults($table, $data);
+        $merged = $this->mergeTypeSpecificDefaults($tcaDefaults, $recordType);
+
+        foreach ($merged as $fieldName => $fieldValue) {
+            if (array_key_exists($fieldName, $data)) {
+                // Caller explicitly set the field (even to null or "") — honour it.
+                continue;
+            }
+            if (!$this->columnHasField($table, $fieldName)) {
+                // Skip fields that no longer exist in TCA.
+                continue;
+            }
+            $data[$fieldName] = $fieldValue;
+        }
+
+        return $data;
+    }
+
+    /**
+     * Type-field values come from the incoming data; fall back to the TCA's
+     * ctrl.type default when the caller didn't supply it.
+     */
+    private function resolveRecordTypeForDefaults(string $table, array $data): string
+    {
+        $typeField = $GLOBALS['TCA'][$table]['ctrl']['type'] ?? null;
+        if (!is_string($typeField) || $typeField === '') {
+            return '';
+        }
+        // tt_content.ctrl.type in TYPO3 14 can be a polymorphic reference
+        // (e.g. 'uid_local:type' for sys_file_reference). Those don't apply
+        // to ordinary TCA-defaults resolution; fall back to no type.
+        if (str_contains($typeField, ':')) {
+            return '';
+        }
+        if (array_key_exists($typeField, $data)) {
+            return (string)$data[$typeField];
+        }
+        return (string)($GLOBALS['TCA'][$table]['columns'][$typeField]['config']['default'] ?? '');
+    }
+
+    /**
+     * Merges field-level defaults with the type-specific variant:
+     *     TCAdefaults.tt_content.color              = foo   (always)
+     *     TCAdefaults.tt_content.color.types.textmedia = bar (only for textmedia)
+     *
+     * Returns a flat [field => value] map with the type-specific variant
+     * taking precedence when the record's type matches.
+     *
+     * @param array<string, mixed> $tableDefaults
+     * @return array<string, mixed>
+     */
+    private function mergeTypeSpecificDefaults(array $tableDefaults, string $recordType): array
+    {
+        $result = [];
+        foreach ($tableDefaults as $key => $value) {
+            if (substr($key, -1) === '.') {
+                // Sub-array like `color. => ['types.' => ['textmedia' => 'bar']]`
+                $fieldName = rtrim($key, '.');
+                if ($recordType !== ''
+                    && is_array($value)
+                    && isset($value['types.'][$recordType])
+                    && !is_array($value['types.'][$recordType])
+                ) {
+                    $result[$fieldName] = $value['types.'][$recordType];
+                }
+                continue;
+            }
+            if (!is_array($value)) {
+                $result[$key] = $value;
+            }
+        }
+        return $result;
     }
 
     /**
