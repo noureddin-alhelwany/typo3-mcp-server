@@ -79,6 +79,59 @@ class FalWriteTest extends AbstractFunctionalTest
         );
     }
 
+    /**
+     * PR-6 Bug 3: sys_file_reference rows written via the FAL shortcut used
+     * to land with crop=NULL, which broke some FE rendering paths and forced
+     * editors to "open and save" the reference in the backend to get a valid
+     * crop JSON. We now default crop to '{}' on insert — the same shape FAL.md
+     * documents as the neutral read-shape. Explicit client-provided crop still
+     * wins.
+     */
+    public function testFalShortcutSetsCropDefaultWhenOmitted(): void
+    {
+        $result = $this->writeTool->execute([
+            'action' => 'create',
+            'table' => 'tt_content',
+            'pid' => 1,
+            'data' => [
+                'CType' => 'image',
+                'header' => 'No explicit crop',
+                'image' => [['file' => 1, 'alternative' => 'x']],
+            ],
+        ]);
+        $this->assertSuccessfulToolResult($result);
+        $parentUid = (int)$this->extractJsonFromResult($result)['uid'];
+
+        $refs = $this->fetchReferencesForParent($parentUid);
+        $this->assertCount(1, $refs);
+        $this->assertSame('{}', (string)$refs[0]['crop'], 'crop must default to empty-JSON, not NULL');
+    }
+
+    public function testFalShortcutRespectsExplicitCrop(): void
+    {
+        $customCrop = '{"Default":{"cropArea":{"x":0,"y":0,"width":0.5,"height":0.5},"selectedRatio":"NaN","focusArea":null}}';
+        $result = $this->writeTool->execute([
+            'action' => 'create',
+            'table' => 'tt_content',
+            'pid' => 1,
+            'data' => [
+                'CType' => 'image',
+                'header' => 'Custom crop',
+                'image' => [[
+                    'file' => 1,
+                    'alternative' => 'x',
+                    'crop' => $customCrop,
+                ]],
+            ],
+        ]);
+        $this->assertSuccessfulToolResult($result);
+        $parentUid = (int)$this->extractJsonFromResult($result)['uid'];
+
+        $refs = $this->fetchReferencesForParent($parentUid);
+        $this->assertCount(1, $refs);
+        $this->assertSame($customCrop, (string)$refs[0]['crop'], 'explicit crop must pass through verbatim');
+    }
+
     public function testReadAfterCreateRoundtrip(): void
     {
         $result = $this->writeTool->execute([

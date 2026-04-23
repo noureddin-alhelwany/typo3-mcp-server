@@ -1445,6 +1445,26 @@ class WriteTableTool extends AbstractRecordTool
             $recordData['uid_local'] = (int)$recordData['file'];
         }
         unset($recordData['file']);
+
+        // PR-6 Bug 3: default `crop` to '{}' instead of leaving it NULL.
+        //
+        // Background: when the backend UI saves a sys_file_reference row, the
+        // form layer populates `crop` with a full CropVariantCollection JSON
+        // (Default/Tablet/Mobile etc. per TCA). Programmatic inserts via
+        // DataHandler don't go through that form layer, so `crop` stays NULL
+        // — and Fluid's ImageViewHelper in combination with CropVariantCollection
+        // can silently produce empty output in some rendering paths when crop
+        // is null but a viewport variant is requested.
+        //
+        // '{}' matches the read-shape documented in FAL.md and acts as "no
+        // explicit crop overrides" — CropVariantCollection::create('{}') then
+        // falls back to the viewport defaults from TCA, which renders the full
+        // image at every viewport. This eliminates the "must open+save in BE
+        // before FE renders" class of bugs without needing to read+synthesize
+        // the concrete cropVariants JSON here.
+        if (!array_key_exists('crop', $recordData) || $recordData['crop'] === null || $recordData['crop'] === '') {
+            $recordData['crop'] = '{}';
+        }
         return $recordData;
     }
     
