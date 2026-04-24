@@ -99,6 +99,11 @@ class WorkspacePreviewRenderTest extends AbstractFunctionalTest
 
         $html = $this->renderPagePreview($pageUid, $workspaceId);
         $this->assertFrontendContains($html, 'PR7-MEDIA-MARKER');
+        // PR-7.1 Bug A: the image reference must actually render in the
+        // preview — not just the header. Before the sorting_foreign fix
+        // the FAL/workspace overlay dropped references with
+        // sorting_foreign=256, producing an empty FILES block.
+        $this->assertFrontendContains($html, 'test.jpg', 'FAL reference must render; sorting_foreign must be in the BE-produced range');
     }
 
     public function testMultipleCEsRenderInCreationOrder(): void
@@ -163,11 +168,24 @@ class WorkspacePreviewRenderTest extends AbstractFunctionalTest
                 . '}' . "\n"
                 // Minimal CType-agnostic renderer that exposes the header so
                 // the regression asserts a visible marker without pulling in
-                // fluid_styled_content.
+                // fluid_styled_content. Also emits the filenames of any FAL
+                // references on `assets` so PR-7.1's sorting_foreign fix can
+                // be pinned by asserting the filename appears in the HTML.
                 . 'tt_content = COA' . "\n"
                 . 'tt_content.10 = TEXT' . "\n"
                 . 'tt_content.10.field = header' . "\n"
-                . 'tt_content.10.wrap = <div class="ce">|</div>' . "\n",
+                . 'tt_content.10.wrap = <div class="ce">|</div>' . "\n"
+                . 'tt_content.20 = FILES' . "\n"
+                . 'tt_content.20 {' . "\n"
+                . '  references {' . "\n"
+                . '    table = tt_content' . "\n"
+                . '    uid.field = uid' . "\n"
+                . '    fieldName = assets' . "\n"
+                . '  }' . "\n"
+                . '  renderObj = TEXT' . "\n"
+                . '  renderObj.data = file:current:name' . "\n"
+                . '  renderObj.wrap = <span class="file">|</span>' . "\n"
+                . '}' . "\n",
             'deleted' => 0,
             'hidden' => 0,
             'tstamp' => time(),

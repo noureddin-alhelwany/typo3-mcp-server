@@ -1412,9 +1412,18 @@ class WriteTableTool extends AbstractRecordTool
             // Don't set the foreign field here - it will be handled after DataHandler
             unset($recordData[$foreignField]);
 
-            // Apply sorting if configured
+            // Apply sorting if configured.
+            //
+            // `sorting_foreign` on sys_file_reference (and equivalents) is a
+            // sequential 1-based counter per (tablenames, fieldname, uid_foreign):
+            // the BE form writes 1 for a single reference, 1+2 for two, etc.
+            // The 256-step convention from `tt_content.sorting` (sparse numbering
+            // for cheap in-between inserts) does NOT apply here — the FAL/workspace
+            // overlay path in the FE renderer can silently drop references whose
+            // sorting_foreign is out of the BE-produced range, which surfaces as
+            // "MCP-created image doesn't render until a BE save".
             if (isset($config['foreign_sortby'])) {
-                $recordData[$config['foreign_sortby']] = ($index + 1) * 256;
+                $recordData[$config['foreign_sortby']] = $index + 1;
             }
 
             if (!isset($dataMap[$foreignTable])) {

@@ -132,6 +132,61 @@ class FalWriteTest extends AbstractFunctionalTest
         $this->assertSame($customCrop, (string)$refs[0]['crop'], 'explicit crop must pass through verbatim');
     }
 
+    /**
+     * PR-7.1 Bug A: sorting_foreign is a per-(tablenames, fieldname, uid_foreign)
+     * sequence that the BE form writes as 1, 2, 3, … — not the 256-step convention
+     * from tt_content.sorting. A single reference must land with sorting_foreign=1,
+     * matching BE output. The production bug that motivated this fix: FAL/workspace
+     * overlay in the FE render silently dropped references with sorting_foreign=256.
+     */
+    public function testSingleReferenceGetsSortingForeignOne(): void
+    {
+        $result = $this->writeTool->execute([
+            'action' => 'create',
+            'table' => 'tt_content',
+            'pid' => 1,
+            'data' => [
+                'CType' => 'image',
+                'header' => 'sorting_foreign=1 guard',
+                'image' => [['file' => 1, 'alternative' => 'a']],
+            ],
+        ]);
+        $this->assertSuccessfulToolResult($result);
+        $parentUid = (int)$this->extractJsonFromResult($result)['uid'];
+
+        $refs = $this->fetchReferencesForParent($parentUid);
+        $this->assertCount(1, $refs);
+        $this->assertSame(1, (int)$refs[0]['sorting_foreign'], 'single reference must have sorting_foreign=1');
+    }
+
+    public function testMultipleReferencesGetSequentialSortingForeign(): void
+    {
+        $result = $this->writeTool->execute([
+            'action' => 'create',
+            'table' => 'tt_content',
+            'pid' => 1,
+            'data' => [
+                'CType' => 'image',
+                'header' => 'sequential sorting_foreign',
+                'image' => [
+                    ['file' => 1, 'alternative' => 'first'],
+                    ['file' => 2, 'alternative' => 'second'],
+                ],
+            ],
+        ]);
+        $this->assertSuccessfulToolResult($result);
+        $parentUid = (int)$this->extractJsonFromResult($result)['uid'];
+
+        $refs = $this->fetchReferencesForParent($parentUid);
+        $this->assertCount(2, $refs);
+        // Order by sorting_foreign to make the assertion position-independent.
+        usort($refs, static fn($a, $b) => (int)$a['sorting_foreign'] <=> (int)$b['sorting_foreign']);
+        $this->assertSame(1, (int)$refs[0]['sorting_foreign']);
+        $this->assertSame(2, (int)$refs[1]['sorting_foreign']);
+        $this->assertSame('first', $refs[0]['alternative']);
+        $this->assertSame('second', $refs[1]['alternative']);
+    }
+
     public function testReadAfterCreateRoundtrip(): void
     {
         $result = $this->writeTool->execute([
