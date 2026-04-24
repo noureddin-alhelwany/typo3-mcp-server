@@ -652,6 +652,13 @@ class WriteTableTool extends AbstractRecordTool
         // symptom PR-7 addresses for theme-conditional rendering).
         $data = $this->applyPageTsConfigDefaults($table, $pid, $data);
 
+        // PR 7.1B: tt_content records inside a b13/container need colPos set
+        // to one of the container's grid slots (e.g. 101), otherwise colPos=0
+        // makes them top-level blocks even though tx_container_parent points
+        // at the container correctly. Auto-assign the first slot when the
+        // caller gave us tx_container_parent but left colPos unset.
+        $data = $this->applyContainerChildColPos($table, $data);
+
         // Prepare the data array
         $newRecordData = $data;
         $newRecordData['pid'] = $pid;
@@ -1503,6 +1510,54 @@ class WriteTableTool extends AbstractRecordTool
             $data[$fieldName] = $fieldValue;
         }
 
+        return $data;
+    }
+
+    /**
+     * Auto-assign `colPos` for tt_content records that are placed inside a
+     * b13/container element. Without this, a caller who sets
+     * `tx_container_parent` but leaves `colPos` at its TCA default of 0 ends
+     * up with a child record that renders as a top-level block — the
+     * container slot stays empty. The container's grid (installed by
+     * b13/container into TCA under
+     * `tt_content.containerConfiguration.<CType>.grid`) defines the valid
+     * colPos values; we pick the first one. Explicit colPos from the caller
+     * always wins. If the parent isn't a container (no grid config), we stay
+     * silent — DataHandler or the caller can surface the real issue.
+     *
+     * @param array<string, mixed> $data
+     * @return array<string, mixed>
+     */
+    protected function applyContainerChildColPos(string $table, array $data): array
+    {
+        if ($table !== 'tt_content') {
+            return $data;
+        }
+        if (array_key_exists('colPos', $data)) {
+            return $data;
+        }
+        $parentUid = (int)($data['tx_container_parent'] ?? 0);
+        if ($parentUid <= 0) {
+            return $data;
+        }
+
+        $parent = BackendUtility::getRecord('tt_content', $parentUid, 'CType');
+        $parentCType = is_array($parent) ? (string)($parent['CType'] ?? '') : '';
+        if ($parentCType === '') {
+            return $data;
+        }
+
+        $grid = $GLOBALS['TCA']['tt_content']['containerConfiguration'][$parentCType]['grid'] ?? null;
+        if (!is_array($grid) || $grid === []) {
+            return $data;
+        }
+
+        $firstCol = $grid[0][0] ?? null;
+        if (!is_array($firstCol) || !array_key_exists('colPos', $firstCol)) {
+            return $data;
+        }
+
+        $data['colPos'] = (int)$firstCol['colPos'];
         return $data;
     }
 

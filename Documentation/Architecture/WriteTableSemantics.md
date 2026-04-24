@@ -50,6 +50,22 @@ The previous global is restored via `finally` so subsequent MCP calls in the sam
 
 When omitted on `tt_content`, `colPos` defaults to `0` ("Normal" column). This is just DataHandler's normal behaviour; nothing MCP-specific.
 
+## Container Children (`tx_container_parent` + `colPos`)
+
+For content placed inside a `b13/container` element, `tx_container_parent` alone is **not** enough — `colPos` must also point at one of the container's grid slots (e.g. `101` for a single-slot accordion). With `colPos=0`, the child is structurally the right CE (it has the right parent reference) but renders as a top-level block because column 0 is outside the container.
+
+WriteTable closes that gap on `create`:
+
+- Gate: `table = tt_content`, `tx_container_parent > 0`, and the caller did **not** set `colPos` explicitly.
+- Looks up the parent's `CType`, then reads `$GLOBALS['TCA']['tt_content']['containerConfiguration'][<CType>]['grid']` (populated by `b13/container`'s `Registry::configureContainer`).
+- Sets `colPos` to the grid's first slot.
+
+Caller-provided `colPos` always wins — useful when the container has multiple slots (e.g. a two-column container with slots 101 and 102) and the caller wants a specific one. If the parent isn't a container (no `containerConfiguration` entry for its CType), the auto-assignment silently does nothing and `colPos` falls through to the TCA default (`0`). No error is raised for that case — DataHandler or the caller is better placed to explain what went wrong.
+
+MCP itself has no runtime dependency on `b13/container`; the logic reads TCA directly, so it works wherever the container extension has populated its config.
+
+Pinned by [WriteTableContainerChildTest](../../Tests/Functional/MCP/Tool/WriteTableContainerChildTest.php).
+
 ## FAL Linking Shortcut — `crop` Default
 
 Writing a `sys_file_reference` via the FAL shortcut (e.g. `image: [{file: N, alternative: "..."}]`) fills `crop` with `'{}'` when the client did not provide one.
