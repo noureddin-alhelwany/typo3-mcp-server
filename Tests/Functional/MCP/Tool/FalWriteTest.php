@@ -632,6 +632,155 @@ class FalWriteTest extends AbstractFunctionalTest
     }
 
     /**
+     * PR 7.3 regression: the parent's FAL counter field (e.g. tt_content.image)
+     * caches the number of related sys_file_reference rows. DataHandler
+     * maintains it during a normal BE save; MCP extracts the inline field
+     * before calling DataHandler, so without the post-hoc sync the counter
+     * stays at 0 — breaks theme Fluid templates that gate on `<f:if
+     * condition="{image}">`.
+     */
+    public function testParentImageCounterIsSetOnCreateWithOneReference(): void
+    {
+        $result = $this->writeTool->execute([
+            'action' => 'create',
+            'table' => 'tt_content',
+            'pid' => 1,
+            'data' => [
+                'CType' => 'image',
+                'header' => 'Counter one',
+                'image' => [['file' => 1, 'alternative' => 'alt']],
+            ],
+        ]);
+        $this->assertSuccessfulToolResult($result);
+        $parentUid = (int)$this->extractJsonFromResult($result)['uid'];
+
+        $this->assertSame(1, $this->fetchParentCounter($parentUid, 'image'));
+    }
+
+    public function testParentImageCounterReflectsMultipleReferences(): void
+    {
+        $result = $this->writeTool->execute([
+            'action' => 'create',
+            'table' => 'tt_content',
+            'pid' => 1,
+            'data' => [
+                'CType' => 'image',
+                'header' => 'Counter two',
+                'image' => [
+                    ['file' => 1, 'alternative' => 'one'],
+                    ['file' => 2, 'alternative' => 'two'],
+                ],
+            ],
+        ]);
+        $this->assertSuccessfulToolResult($result);
+        $parentUid = (int)$this->extractJsonFromResult($result)['uid'];
+
+        $this->assertSame(2, $this->fetchParentCounter($parentUid, 'image'));
+    }
+
+    public function testParentAssetsCounterIsSetForTextmedia(): void
+    {
+        $result = $this->writeTool->execute([
+            'action' => 'create',
+            'table' => 'tt_content',
+            'pid' => 1,
+            'data' => [
+                'CType' => 'textmedia',
+                'header' => 'Assets counter',
+                'bodytext' => '<p>body</p>',
+                'assets' => [['file' => 1, 'alternative' => 'alt']],
+            ],
+        ]);
+        $this->assertSuccessfulToolResult($result);
+        $parentUid = (int)$this->extractJsonFromResult($result)['uid'];
+
+        $this->assertSame(1, $this->fetchParentCounter($parentUid, 'assets'));
+        $this->assertSame(0, $this->fetchParentCounter($parentUid, 'image'));
+    }
+
+    public function testParentImageCounterDecrementsOnUpdateRemovingReferences(): void
+    {
+        $createResult = $this->writeTool->execute([
+            'action' => 'create',
+            'table' => 'tt_content',
+            'pid' => 1,
+            'data' => [
+                'CType' => 'image',
+                'header' => 'Shrink list',
+                'image' => [
+                    ['file' => 1, 'alternative' => 'keep'],
+                    ['file' => 2, 'alternative' => 'drop'],
+                ],
+            ],
+        ]);
+        $this->assertSuccessfulToolResult($createResult);
+        $parentUid = (int)$this->extractJsonFromResult($createResult)['uid'];
+        $this->assertSame(2, $this->fetchParentCounter($parentUid, 'image'));
+
+        $readResult = $this->readTool->execute(['table' => 'tt_content', 'uid' => $parentUid]);
+        $refs = $this->extractJsonFromResult($readResult)['records'][0]['image'];
+        $keepUid = (int)$refs[0]['uid'];
+
+        $updateResult = $this->writeTool->execute([
+            'action' => 'update',
+            'table' => 'tt_content',
+            'uid' => $parentUid,
+            'data' => [
+                'image' => [
+                    ['uid' => $keepUid, 'file' => 1, 'alternative' => 'keep'],
+                ],
+            ],
+        ]);
+        $this->assertSuccessfulToolResult($updateResult);
+
+        $this->assertSame(1, $this->fetchParentCounter($parentUid, 'image'));
+    }
+
+    public function testParentImageCounterZerosOnUpdateClearingAllReferences(): void
+    {
+        $createResult = $this->writeTool->execute([
+            'action' => 'create',
+            'table' => 'tt_content',
+            'pid' => 1,
+            'data' => [
+                'CType' => 'image',
+                'header' => 'Clear all',
+                'image' => [['file' => 1, 'alternative' => 'gone']],
+            ],
+        ]);
+        $this->assertSuccessfulToolResult($createResult);
+        $parentUid = (int)$this->extractJsonFromResult($createResult)['uid'];
+        $this->assertSame(1, $this->fetchParentCounter($parentUid, 'image'));
+
+        $updateResult = $this->writeTool->execute([
+            'action' => 'update',
+            'table' => 'tt_content',
+            'uid' => $parentUid,
+            'data' => ['image' => []],
+        ]);
+        $this->assertSuccessfulToolResult($updateResult);
+
+        $this->assertSame(0, $this->fetchParentCounter($parentUid, 'image'));
+    }
+
+    /**
+     * Read the parent's counter field straight from the workspace row MCP
+     * just wrote, bypassing any restriction/overlay layer.
+     */
+    private function fetchParentCounter(int $parentUid, string $fieldName): int
+    {
+        $qb = $this->connectionPool->getQueryBuilderForTable('tt_content');
+        $qb->getRestrictions()->removeAll();
+        $value = $qb->select($fieldName)
+            ->from('tt_content')
+            ->where($qb->expr()->eq('uid', $qb->createNamedParameter($parentUid, ParameterType::INTEGER)))
+            ->executeQuery()
+            ->fetchOne();
+        $this->assertNotFalse($value, "tt_content row {$parentUid} must exist");
+        return (int)$value;
+    }
+
+    /**
      * Fetch raw sys_file_reference rows for a given parent tt_content, bypassing the
      * TCA-aware ReadTable layer so we can directly inspect workspace fields.
      */

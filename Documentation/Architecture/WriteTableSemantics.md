@@ -66,6 +66,10 @@ MCP itself has no runtime dependency on `b13/container`; the logic reads TCA dir
 
 Pinned by [WriteTableContainerChildTest](../../Tests/Functional/MCP/Tool/WriteTableContainerChildTest.php).
 
+## FAL Parent Counter Sync
+
+Inline fields like `tt_content.image`, `tt_content.assets`, `pages.media` store an integer count of their related `sys_file_reference` rows on the parent row. DataHandler maintains that counter during a normal BE save; the MCP two-step flow can't, because the inline field is extracted from the parent's datamap before DataHandler runs. WriteTable syncs the counter manually after child processing completes on create and update. See [FAL.md — Parent counter fields](FAL.md) for the mechanics.
+
 ## FAL Linking Shortcut — `crop` Default
 
 Writing a `sys_file_reference` via the FAL shortcut (e.g. `image: [{file: N, alternative: "..."}]`) fills `crop` with `'{}'` when the client did not provide one.

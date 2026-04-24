@@ -107,6 +107,26 @@ Updates with a stable `uid` on each reference (as returned by `ReadTable`) prese
 
 References always run through the current workspace.
 
+### Parent counter fields
+
+TYPO3 caches the number of related `sys_file_reference` rows on the parent as an integer in the counter column (`tt_content.image`, `tt_content.assets`, `pages.media`, etc.). During a normal BE save DataHandler's `checkValue_inline_processDBdata` maintains this value via `RelationHandler::countItems(false)`. The MCP flow does **not** pass the inline field in the parent's datamap — children are created in a second DataHandler pass because the live `uid_foreign` is only known after the parent exists — so DataHandler never sees an inline value to count from and the counter would stay at `0`.
+
+To keep the invariant, WriteTable syncs the counter after child processing completes:
+
+```
+count  = SELECT COUNT(*) FROM <foreignTable>
+         WHERE <foreignField> = <liveParentUid>
+           AND deleted = 0
+           AND t3ver_state <> 2          -- exclude delete placeholders
+           AND <foreign_match_fields>    -- tablenames + fieldname for sys_file_reference
+
+UPDATE <parentTable> SET <fieldName> = count WHERE uid = <workspaceParentUid>
+```
+
+The sync runs for every inline field where the foreign table is `hideTable`, on both create and update. That's the same set of fields our two-step flow handles — `sys_file_reference` and any hide-table IRRE child table like `tx_news_domain_model_link`. Non-hidden inline tables (e.g. `tt_content` as an IRRE child of something else) pass through DataHandler normally and get the native counter update, so the sync skips them. The fix is generic across all such fields, not FAL-specific.
+
+Pinned by `testParentImageCounterIsSetOnCreateWithOneReference` (and siblings) in [FalWriteTest](../../Tests/Functional/MCP/Tool/FalWriteTest.php).
+
 ## Workspace Versioning for Live Records
 
 Updates that target a record with no pre-existing workspace version — whether on the parent (`tt_content`) or directly on a `sys_file_reference` — run through an explicit two-step DataHandler sequence:

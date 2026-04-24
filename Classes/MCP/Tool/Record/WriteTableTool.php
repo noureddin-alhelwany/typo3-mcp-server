@@ -778,7 +778,7 @@ class WriteTableTool extends AbstractRecordTool
                             // RelationHandler's writeForeignField is for MM relations, not direct foreign fields
                             $connection = GeneralUtility::makeInstance(ConnectionPool::class)
                                 ->getConnectionForTable($foreignTable);
-                            
+
                             foreach ($childUids as $childUid) {
                                 $connection->update(
                                     $foreignTable,
@@ -790,9 +790,15 @@ class WriteTableTool extends AbstractRecordTool
                     }
                 }
             }
+
+            // PR 7.3: parent's inline counter (tt_content.image, pages.media, ...)
+            // must match the actual child-row count. DataHandler would do this
+            // natively if we'd passed the inline field in the parent datamap; we
+            // don't (see helper docblock), so sync it here.
+            $this->syncInlineCountersForWrite($table, $parentUid, $liveParentUid, $inlineRelations);
         }
-        
-        
+
+
         // Handle after/before positioning if needed
         if (strpos($position, 'after:') === 0 || strpos($position, 'before:') === 0) {
             $positionType = substr($position, 0, strpos($position, ':'));
@@ -957,6 +963,11 @@ class WriteTableTool extends AbstractRecordTool
                     }
                 }
             }
+
+            // PR 7.3: sync parent inline counter — also runs for list-shrinking
+            // updates where no new children are created but existing ones were
+            // removed by handleExistingEmbeddedRelations().
+            $this->syncInlineCountersForWrite($table, $workspaceUid, $uid, $inlineRelations);
         }
 
         // Return the result with the original live UID (workspace transparency).
@@ -1809,18 +1820,108 @@ class WriteTableTool extends AbstractRecordTool
                 // Use DataHandler to delete records (respects workspaces)
                 $dataHandler = GeneralUtility::makeInstance(DataHandler::class);
                 $dataHandler->BE_USER = $GLOBALS['BE_USER'];
-                
+
                 $cmdMap = [];
                 foreach ($deleteUids as $deleteUid) {
                     $cmdMap[$foreignTable][$deleteUid]['delete'] = 1;
                 }
-                
+
                 $dataHandler->start([], $cmdMap);
                 $dataHandler->process_cmdmap();
             }
         }
     }
-    
+
+    /**
+     * Drive `syncParentInlineCounter` for every inline field processed by a
+     * write. Only hide-table foreign-tables need the post-hoc sync — for
+     * non-hidden inline tables (e.g. tt_content as a child) our flow passes
+     * through DataHandler normally and the counter is maintained natively.
+     *
+     * @param array<string, array{config: array<string, mixed>, value: mixed}> $inlineRelations
+     */
+    protected function syncInlineCountersForWrite(
+        string $parentTable,
+        int $parentUidStored,
+        int $parentUidForChildren,
+        array $inlineRelations
+    ): void {
+        foreach ($inlineRelations as $fieldName => $relationData) {
+            $config = $relationData['config'] ?? [];
+            $foreignTable = (string)($config['foreign_table'] ?? '');
+            $foreignField = (string)($config['foreign_field'] ?? '');
+            if ($foreignTable === '' || $foreignField === '') {
+                continue;
+            }
+            $isHiddenTable = (($GLOBALS['TCA'][$foreignTable]['ctrl']['hideTable'] ?? false) === true);
+            if (!$isHiddenTable) {
+                continue;
+            }
+            $matchFields = is_array($config['foreign_match_fields'] ?? null)
+                ? $config['foreign_match_fields']
+                : [];
+            $this->syncParentInlineCounter(
+                $parentTable,
+                $parentUidStored,
+                $parentUidForChildren,
+                $fieldName,
+                $foreignTable,
+                $foreignField,
+                $matchFields
+            );
+        }
+    }
+
+    /**
+     * Sync the parent's inline-field counter (e.g. `tt_content.image`,
+     * `pages.media`) with the actual number of related hide-table child
+     * rows. During a normal BE save DataHandler does this automatically via
+     * `RelationHandler::countItems(false)` after processing an inline
+     * datamap. MCP extracts inline fields from the parent's datamap before
+     * calling DataHandler (because the two-step workspace flow resolves the
+     * live uid_foreign for children only after the parent exists), so the
+     * counter is never updated. Themes whose Fluid templates gate on the
+     * counter (`<f:if condition="{image}">`) then skip the block even
+     * though references exist.
+     *
+     * The sync here mirrors what DataHandler would write: the deleted
+     * records are excluded, workspace delete placeholders (t3ver_state=2)
+     * are excluded, and the count is scoped by whatever match fields the
+     * inline config carries (for sys_file_reference that's tablenames +
+     * fieldname; for other hide-table foreign-tables those columns don't
+     * exist and the scope collapses to the foreign-field alone).
+     *
+     * @param array<string, mixed> $matchFields
+     */
+    protected function syncParentInlineCounter(
+        string $parentTable,
+        int $parentUidStored,
+        int $parentUidForChildren,
+        string $fieldName,
+        string $foreignTable,
+        string $foreignField,
+        array $matchFields
+    ): void {
+        $foreignConnection = GeneralUtility::makeInstance(ConnectionPool::class)
+            ->getConnectionForTable($foreignTable);
+        $qb = $foreignConnection->createQueryBuilder();
+        $qb->count('*')
+            ->from($foreignTable)
+            ->where(
+                $qb->expr()->eq($foreignField, $qb->createNamedParameter($parentUidForChildren, ParameterType::INTEGER)),
+                $qb->expr()->eq('deleted', $qb->createNamedParameter(0, ParameterType::INTEGER)),
+                $qb->expr()->neq('t3ver_state', $qb->createNamedParameter(2, ParameterType::INTEGER))
+            );
+        foreach ($matchFields as $column => $value) {
+            $qb->andWhere($qb->expr()->eq($column, $qb->createNamedParameter((string)$value)));
+        }
+        $count = (int)$qb->executeQuery()->fetchOne();
+
+        GeneralUtility::makeInstance(ConnectionPool::class)
+            ->getConnectionForTable($parentTable)
+            ->update($parentTable, [$fieldName => $count], ['uid' => $parentUidStored]);
+    }
+
     /**
      * Validate inline relation data
      */
